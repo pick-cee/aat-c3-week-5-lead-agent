@@ -1,0 +1,19 @@
+# Secrets and local environment overrides
+.env
+.env.*
+!.env.example
+
+# Dependencies and Next.js build output
+node_modules/
+.next/
+out/
+
+# Test and TypeScript output
+coverage/
+*.tsbuildinfo
+
+# Local tooling and operating-system files
+.vercel/
+.DS_Store
+Thumbs.db
+*.log

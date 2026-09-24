@@ -1,0 +1,40 @@
+{
+  "name": "koya-lead-agent",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20.9 <25"
+  },
+  "scripts": {
+    "dev": "npm run db:migrate && next dev",
+    "build": "next build",
+    "start": "npm run db:migrate && next start",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/**/*.test.ts",
+    "test:broken": "tsx scripts/broken-pack.ts",
+    "inspect:apify": "tsx scripts/inspect-apify-actor.ts",
+    "demo:stub-stage": "tsx scripts/demo-stub-stage.ts",
+    "test:firecrawl": "tsx scripts/test-firecrawl-smallest.ts",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "db:inspect": "tsx scripts/inspect-database.ts",
+    "verify:grants": "tsx scripts/verify-grants.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.280",
+    "@supabase/supabase-js": "^2.117.1",
+    "dotenv": "^18.0.3",
+    "next": "^16.3.6",
+    "pg": "^8.23.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/pg": "^8.15.5",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
