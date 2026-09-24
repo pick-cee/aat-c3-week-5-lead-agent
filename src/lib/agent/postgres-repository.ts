@@ -167,12 +167,12 @@ export class PostgresLeadAgentRepository implements LeadAgentToolRepository {
       const row = await withTransaction(async (client) => {
         const result = await client.query<CandidateRow>(
           `insert into lead_agent.candidates
-             (run_id, company_name, domain, domain_canonical, origin, discovery_payload, status, skip_reason)
+             (run_id, company_name, domain, domain_canonical, origin, discovery_payload, status, skip_reason, research_priority)
            values ($1, $2, $3, $4, $5, $6::jsonb,
-                   case when $7::text is null then 'discovered' else 'skipped' end::lead_agent.candidate_status, $7::text)
+                   case when $7::text is null then 'discovered' else 'skipped' end::lead_agent.candidate_status, $7::text, $8::smallint)
            on conflict (run_id, domain_canonical) do nothing
            returning id, company_name, domain, domain_canonical, discovery_payload`,
-          [runId, record.companyName, record.domain, record.domainCanonical, origin, JSON.stringify(record.discoveryPayload), record.skipReason ?? null],
+          [runId, record.companyName, record.domain, record.domainCanonical, origin, JSON.stringify(record.discoveryPayload), record.skipReason ?? null, Math.max(0, Math.min(100, Math.round(record.priority ?? 0)))],
         );
         const candidate = result.rows[0];
         if (!candidate) return null;

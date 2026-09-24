@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 
-import { assumptionTargets, sanitizeAssumptionLinks, type AssumptionTarget, type CriterionList, type IcpField, type RefinedIcp } from "@/lib/checks/icp";
+import { assumptionTargets, hiringRequirement, sanitizeAssumptionLinks, type AssumptionTarget, type CriterionList, type IcpField, type RefinedIcp } from "@/lib/checks/icp";
 import { linkedInCompanySizes, linkedInLocations } from "@/lib/providers/linkedin-filters";
 import { money } from "@/lib/ui/labels";
 
@@ -183,6 +183,7 @@ export function IcpCheckpoint({ runId, objective, initial, limits, notificationE
   const disabled = busy !== null;
   const locations = useMemo(() => linkedInLocations(icp.geography), [icp.geography]);
   const sizes = useMemo(() => linkedInCompanySizes(icp.headcount_range), [icp.headcount_range]);
+  const hiring = useMemo(() => hiringRequirement(icp.hard_filters), [icp.hard_filters]);
 
   const markChanged = (assumptionId: number) =>
     setAssumptions((items) => items.map((item) => (item.id === assumptionId && (item.status === "open" || item.status === "right") ? { ...item, status: "changed" } : item)));
@@ -328,9 +329,17 @@ export function IcpCheckpoint({ runId, objective, initial, limits, notificationE
       <div className="approve-facts">
         <div><h3>How Koya will search</h3>
           <ul className="fact-list">
-            <li><Icon name="building" size={15} />LinkedIn company records, up to {limits.max_candidates ?? 30} companies per search</li>
-            <li><Icon name="search" size={15} />Location filter: {locations.length ? locations.join(", ") : <em>none, so companies anywhere are considered</em>}</li>
-            <li><Icon name="list" size={15} />Size filter: {sizes.length ? `${sizes.join(", ")} employees` : <em>none. Koya could not read a size from &quot;{icp.headcount_range || "blank"}&quot;, so size is checked company by company</em>}</li>
+            {hiring
+              ? <>
+                <li><Icon name="building" size={15} />LinkedIn job ads from the last month, because a must-have is &quot;{hiring}&quot;: every company found is hiring, and its ads are the evidence</li>
+                <li><Icon name="search" size={15} />Job location: {locations[0] ?? <em>anywhere</em>}</li>
+                <li><Icon name="list" size={15} />Size and headquarters are checked from each company&apos;s LinkedIn record; companies that clearly miss them are filtered out before any research</li>
+              </>
+              : <>
+                <li><Icon name="building" size={15} />LinkedIn company records, up to {limits.max_candidates ?? 30} companies per search</li>
+                <li><Icon name="search" size={15} />Location filter: {locations.length ? locations.join(", ") : <em>none, so companies anywhere are considered</em>}</li>
+                <li><Icon name="list" size={15} />Size filter: {sizes.length ? `${sizes.join(", ")} employees` : <em>none. Koya could not read a size from &quot;{icp.headcount_range || "blank"}&quot;, so size is checked company by company</em>}</li>
+              </>}
             {excludedCount > 0 && <li><Icon name="repeat" size={15} />Skips {excludedCount} compan{excludedCount === 1 ? "y" : "ies"} an earlier run already decided on</li>}
           </ul>
         </div>

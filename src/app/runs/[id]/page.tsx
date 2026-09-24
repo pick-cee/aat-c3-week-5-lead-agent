@@ -11,6 +11,7 @@ import { RunRecipient } from "@/app/components/run-recipient";
 import { Activity, CriteriaSummary, DraftingCriteria, Journey, Outcome, Progress, Stopped } from "@/app/components/run-sections";
 import { RunStatusPill } from "@/app/components/status";
 import { getDashboard } from "@/lib/runs/dashboard";
+import { draftingTopUp, leadsAwaitingDrafts } from "@/lib/runs/drafting-budget";
 import { ago, RUNNING_STATUSES, runStatus, TERMINAL_STATUSES } from "@/lib/ui/labels";
 
 export const dynamic = "force-dynamic";
@@ -24,6 +25,7 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
   const awaiting = run.status === "awaiting_icp_confirmation";
   const terminal = TERMINAL_STATUSES.has(run.status);
   const finished = run.status === "complete" || run.status === "short_of_target";
+  const awaitingDrafts = leadsAwaitingDrafts(candidates);
 
   return <div className="page run-page">
     <AutoRefresh active={running} runId={run.id} />
@@ -43,14 +45,14 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
 
     {run.status === "draft" && <DraftingCriteria />}
     {awaiting && run.refined_icp && <IcpCheckpoint runId={run.id} objective={run.objective} initial={run.refined_icp} limits={run.limits} notificationEmail={run.notify_on_success || run.notify_on_failure ? run.notification_email : null} excludedCount={run.excluded_count} />}
-    {run.status === "awaiting_budget" && run.budget_request && <BudgetRequestPanel runId={run.id} request={run.budget_request} />}
+    {run.status === "awaiting_budget" && run.budget_request && <BudgetRequestPanel runId={run.id} request={run.budget_request} drafting={{ leads: awaitingDrafts, topUpUsd: draftingTopUp(run.limits.agent_budget_usd, Number(run.agent_cost_usd), awaitingDrafts) }} />}
     {(running || run.status === "awaiting_budget") && run.status !== "draft" && <Progress data={data} />}
     {finished && <Outcome data={data} />}
     {(run.status === "failed" || run.status === "budget_exceeded" || run.status === "cancelled") && <Stopped run={run} />}
 
     {candidates.length > 0 && <section className="section">
       <div className="section-head"><div><h2>Leads</h2><p className="muted">Click any reason to see the exact evidence behind it.</p></div></div>
-      <LeadBoard runId={run.id} candidates={candidates} />
+      <LeadBoard runId={run.id} candidates={candidates} approveAddsUsd={finished ? draftingTopUp(run.limits.agent_budget_usd, Number(run.agent_cost_usd), awaitingDrafts + 1) - draftingTopUp(run.limits.agent_budget_usd, Number(run.agent_cost_usd), awaitingDrafts) : 0} />
     </section>}
 
     {!awaiting && run.refined_icp && <CriteriaSummary run={run} />}

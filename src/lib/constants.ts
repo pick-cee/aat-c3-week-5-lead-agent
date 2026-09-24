@@ -2,8 +2,15 @@ export const PRICES_VERIFIED_ON = "2026-09-24" as const;
 
 export const LEAD_TARGET = 10;
 export const DISCOVERY_POOL_MULTIPLIER = 3;
-export const MAX_REFILLS = 2;
-export const MAX_CANDIDATES = LEAD_TARGET * DISCOVERY_POOL_MULTIPLIER;
+// Searches are the cheap part (about $0.12 a page) now that companies the
+// record already rules out are set aside before research; research is the
+// expensive part. Run 12f27441 had 115,912 matches and saw 60 of them.
+export const MAX_REFILLS = 4;
+// One full LinkedIn result page. Paging moves 50 results at a time, so taking
+// 30 skipped 20 companies per page. Companies the record rules out now cost
+// $0.004 each and no research, so breadth is cheap (run 12f27441 replay: 24 of
+// 30 set aside by their LinkedIn count).
+export const MAX_CANDIDATES = Math.max(LEAD_TARGET * DISCOVERY_POOL_MULTIPLIER, 50);
 export const MAX_APIFY_CALLS = 1 + MAX_REFILLS;
 // Sized from run 6cd3a95a: about 8 tool calls and 2 scrapes per company, and a
 // 30-company pool plus refills. 120 calls ran out after 12 companies.
@@ -11,6 +18,7 @@ export const MAX_SCRAPES_TOTAL = 90;
 export const MAX_SCRAPES_PER_COMPANY = 3;
 export const MAX_TOOL_CALLS = 250;
 export const MAX_RESEARCH_ATTEMPTS = 3;
+export const MAX_DRAFT_ATTEMPTS = 3;
 // One step researches several companies at once and can take a few minutes;
 // the lease must outlast it or a second runner starts the same work.
 export const RUNNER_LEASE_SECONDS = 300;
@@ -20,14 +28,23 @@ export const DRAFT_PARALLELISM = 3;
 export const STALE_RESEARCH_MINUTES = 10;
 export const MAIN_SERVER_SCHEDULER_INTERVAL_SECONDS = 15;
 
-// Measured: about $0.10 of AI per researched company and $0.08 per drafted
-// lead. Reaching ten qualified from ~25 researched needs roughly $3.
+// Measured 2026-09-24 in the isolated runtime: $0.064 of AI per researched
+// company (was $0.10 before AGENTS.md and host context stopped leaking into
+// every stage) and $0.045 to $0.072 per drafted lead.
 export const AGENT_BUDGET_USD = 3;
-export const APIFY_BUDGET_USD = 0.5;
+// The PRD's Apify allowance is $5 per person for the whole week, so one run
+// must not take a fifth of it. Three company searches ($0.20 each) or six job
+// searches ($0.10 each); a run that needs more asks the founder.
+export const APIFY_BUDGET_USD = 0.6;
+// LinkedIn's size band is chosen by the company and often years stale
+// (WhatsApp: "51-200", 6,083 people listing it). A company with more than this
+// multiple of the ICP's ceiling in people listing it as employer is set aside
+// before research. The multiple leaves room for people who left or misattribute.
+export const HEADCOUNT_SET_ASIDE_FACTOR = 2;
 // Below this, a step is not started; the founder is asked for more instead.
 export const MIN_STAGE_BUDGET_USD = 0.05;
-// A founder-approved extra search: one 30-company page at $0.004 plus a start.
-export const EXTRA_SEARCH_APIFY_USD = 0.15;
+// A founder-approved extra search: one 50-company page at $0.004 plus a start.
+export const EXTRA_SEARCH_APIFY_USD = 0.21;
 export const MAX_REFILLS_CEILING = 8;
 export const AGENT_TOPUP_OPTIONS_USD = [1, 2] as const;
 // Google Search returned encyclopaedia, job-board and video pages rather than
@@ -49,6 +66,16 @@ export const APIFY_REQUEST_WAIT_SECONDS = 60;
 export const APIFY_COST_SETTLE_SECONDS = 15;
 export const APIFY_ACTOR_MAX_RESULTS = 50;
 export const APIFY_JOB_START_STALE_SECONDS = 120;
+// Hiring-led discovery (verified 2026-09-24 with three capped runs of 3 to 5
+// ads, $0.003 to $0.005 each): pay-per-event, never rental. Returns the job
+// title, place and date plus the company's website, HQ address, LinkedIn
+// employee count, industry and description. LinkedIn's public job search
+// ignores the industry filter, so the sector is steered with a keyword.
+export const APIFY_JOBS_ACTOR_ID = "curious_coder~linkedin-jobs-scraper";
+export const APIFY_JOB_AD_USD = 0.001;
+export const APIFY_JOBS_START_USD = 0.00005;
+export const APIFY_JOB_ADS_PER_SEARCH = 100;
+export const APIFY_JOB_ADS_POSTED_WITHIN = "pastMonth";
 export const LINKEDIN_COMPANY_SIZES = [
   { label: "1-10", min: 1, max: 10 },
   { label: "11-50", min: 11, max: 50 },
@@ -68,8 +95,16 @@ export const STAGE_LIMITS = {
   // Successful research cost $0.06 to $0.12 in run 6cd3a95a, so a $0.12 cap
   // left no room for a single corrected attempt. The cap stops runaways.
   qualify_one: { maxTurns: 10, maxBudgetUsd: 0.25 },
-  draft_one: { maxTurns: 8, maxBudgetUsd: 0.1 },
+  // $0.10 could never be enough: a real drafting step spent $0.13 before its
+  // first word (measured 2026-09-24), so no run had ever saved a draft.
+  draft_one: { maxTurns: 8, maxBudgetUsd: 0.25 },
 } as const;
+
+// Research never spends the money that drafting the leads already qualified
+// needs. Run 12f27441 spent its whole allowance on research, and finishing it
+// then produced six leads with no outreach at all. Measured drafts cost $0.045
+// to $0.072 each in the isolated runtime (2026-09-24); this leaves headroom.
+export const DRAFT_RESERVE_PER_LEAD_USD = 0.12;
 
 export const CLAUDE_MODELS = {
   economical: "claude-haiku-4-5-20251001",
@@ -134,6 +169,7 @@ export const DISALLOWED_AGENT_TOOLS = [
 
 export const LEAD_AGENT_TOOL_NAMES = [
   "mcp__lead_agent__search_companies",
+  "mcp__lead_agent__search_job_ads",
   "mcp__lead_agent__scrape_site",
   "mcp__lead_agent__store_excerpts",
   "mcp__lead_agent__record_qualification",

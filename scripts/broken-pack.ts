@@ -5,12 +5,13 @@ import type { PreToolUseHookInput } from "@anthropic-ai/claude-agent-sdk";
 
 import { checkOutreachCopy } from "../src/lib/checks/copy";
 import { checkQualification } from "../src/lib/checks/qualification";
-import { checkRefinedIcp } from "../src/lib/checks/icp";
+import { checkRefinedIcp, hiringRequirement } from "../src/lib/checks/icp";
 import { canonicalizeDomain } from "../src/lib/agent/domain";
 import { scanForPromptInjection } from "../src/lib/agent/injection-scan";
 import { createPreToolUseHook } from "../src/lib/agent/pre-tool-use";
 import { stripDiscoveryRecord } from "../src/lib/agent/tool-server";
-import { linkedInLocations } from "../src/lib/providers/linkedin-filters";
+import { STAGE_TOOLS } from "../src/lib/runner/stage-executor";
+import { clearlyAboveHeadcount, linkedInLocations } from "../src/lib/providers/linkedin-filters";
 import { DISALLOWED_AGENT_TOOLS, LEAD_AGENT_TOOL_NAMES } from "../src/lib/constants";
 import type { ToolCallLog, UsageGuardRepository } from "../src/lib/agent/types";
 
@@ -58,8 +59,22 @@ async function main() {
     assert.match(runStore, /runner_lease_until is null or r\.runner_lease_until < now\(\)/);
   });
   pass("the bare text UK never reaches LinkedIn, which reads it as Ukraine", () => assert.deepEqual(linkedInLocations(["UK"]), ["United Kingdom"]));
-  const stepCap = await readFile("supabase/migrations/0007_discovery_step_cap_and_workspace_settings.sql", "utf8");
+  const stepCap = await readFile("supabase/migrations/0009_search_cap_counts_started_searches.sql", "utf8");
   pass("a second paid search in one discovery step is refused by the database", () => assert.match(stepCap, /One discovery search per step/));
+  pass("the search cap counts searches that ran, so a rejected call cannot spend the next step's search", () => {
+    assert.match(stepCap, /v_job \? 'id'/);
+    assert.match(stepCap, /jsonb_each\(coalesce\(v_jobs/);
+  });
+  const jobAdsGuard = await readFile("supabase/migrations/0010_job_ads_search_shares_the_search_cap.sql", "utf8");
+  pass("a job-ad search is a paid search under the same one-per-step guard", () => assert.match(jobAdsGuard, /search_job_ads/));
+  pass("a hiring must-have is searched through job ads, whose ads are its evidence", () => {
+    assert.equal(hiringRequirement(["Headquartered in the United Kingdom", "Hiring for customer support roles"]), "Hiring for customer support roles");
+    assert.ok(STAGE_TOOLS.discover.includes("mcp__lead_agent__search_job_ads"));
+  });
+  pass("a company whose LinkedIn count dwarfs the headcount limit is set aside before research", () => {
+    assert.ok(clearlyAboveHeadcount(6083, "10 to 100"));
+    assert.equal(clearlyAboveHeadcount(87, "10 to 100"), null);
+  });
   const toolServer = await readFile("src/lib/agent/tool-server.ts", "utf8");
   pass("store_excerpts takes a source id, never agent-supplied text", () => {
     const schema = toolServer.slice(toolServer.indexOf('"store_excerpts"'), toolServer.indexOf("async (args)", toolServer.indexOf('"store_excerpts"')));

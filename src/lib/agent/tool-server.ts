@@ -8,7 +8,7 @@ import { checkOutreachCopy } from "@/lib/checks/copy";
 import type { RefinedIcp } from "@/lib/checks/icp";
 import { checkQualification } from "@/lib/checks/qualification";
 import { DISCOVERY_SOURCE_PREFIX, STAGE_MODELS } from "@/lib/constants";
-import { headquartersOutside, industryIds, linkedInCompanySizes, linkedInLocations } from "@/lib/providers/linkedin-filters";
+import { clearlyAboveHeadcount, headquartersOutside, industryAffinity, industryIds, linkedInCompanySizes, linkedInLocations, normalizeKeywords } from "@/lib/providers/linkedin-filters";
 import { fixtureDiscoveryProvider, fixtureSiteScraper } from "@/lib/providers/fixture";
 import type { CompanyDiscoveryProvider, SiteScraper } from "@/lib/providers/types";
 
@@ -36,13 +36,24 @@ const WRITE_ANNOTATIONS = {
   },
 } as const;
 
+// Company facts only. The member count, specialities and company type were
+// added because without them a size filter could never be proven and every
+// in-range company ended in review (run 12f27441). `hiring` is the company's
+// open job ads as title, place, date and public link: the evidence for a
+// "hiring for a role" must-have. None is contact-shaped; ad text and posters
+// are never kept.
 const DISCOVERY_ALLOWLIST = [
   "company_name",
   "domain",
   "headcount",
+  "linkedin_members",
   "industry",
   "location",
   "description",
+  "specialities",
+  "company_type",
+  "hiring",
+  "discovery_source",
   "funding",
 ] as const;
 
@@ -126,14 +137,120 @@ export function createLeadAgentToolServer(
   repository: LeadAgentToolRepository,
   providers: {
     discovery?: CompanyDiscoveryProvider;
+    jobAds?: CompanyDiscoveryProvider;
     scraper?: SiteScraper;
   } = {},
+  onlyTools?: readonly string[],
 ) {
   const discoveryProvider = providers.discovery ?? fixtureDiscoveryProvider;
+  const jobAdsProvider = providers.jobAds ?? fixtureDiscoveryProvider;
   const siteScraper = providers.scraper ?? fixtureSiteScraper;
   // Page text fetched in this stage, keyed by source id. store_excerpts chunks
   // from here so the agent cannot hand back text of its own as "evidence".
   const pageText = new Map<string, string>();
+
+  /**
+   * Shared by both searches, so the allowlist, the set-asides, the paid-cost
+   * record and the audit shape are identical whichever one the agent chose.
+   */
+  async function ingestDiscovery(
+    run: Awaited<ReturnType<LeadAgentToolRepository["getRunContext"]>>,
+    jobKey: string,
+    locations: string[],
+    discovery: Awaited<ReturnType<CompanyDiscoveryProvider["search"]>>,
+    filters: Record<string, unknown>,
+  ) {
+    const storedLimit = run.limits.max_candidates;
+    const icp = (run.refinedIcp ?? {}) as Partial<RefinedIcp>;
+    const excluded = new Set(run.excludedDomains.map((domain) => canonicalizeDomain(domain)));
+    const companies = discovery.records
+      .map((raw) => ({ ...raw, domain: raw.domain ?? raw.company_domain }))
+      .map((record) => stripDiscoveryRecord(record))
+      .filter((record) => typeof record.company_name === "string" && typeof record.domain === "string")
+      .slice(0, storedLimit);
+    const fresh = companies.filter((company) => !excluded.has(canonicalizeDomain(String(company.domain))));
+    const origin = run.refillsUsed === 0 ? "discovery" : `refill_${run.refillsUsed}`;
+    // What the record already rules out is set aside with its reason, not
+    // researched: each research step costs about $0.06 to $0.09 to reach a
+    // verdict the discovery record states. Unknown values are always researched.
+    const headcountRange = String(icp.headcount_range ?? "");
+    const setAsideFor = (company: AllowedDiscoveryRecord): { kind: "location" | "size"; reason: string } | null => {
+      const location = typeof company.location === "string" ? company.location : undefined;
+      if (headquartersOutside(location, locations)) {
+        return { kind: "location", reason: `Headquartered in ${location}, outside ${locations.join(" / ")}. Set aside without spending research on it.` };
+      }
+      const size = clearlyAboveHeadcount(company.linkedin_members, headcountRange);
+      return size ? { kind: "size", reason: size } : null;
+    };
+    const setAside = new Map(fresh.flatMap((company) => {
+      const verdict = setAsideFor(company);
+      return verdict ? [[canonicalizeDomain(String(company.domain)), verdict] as const] : [];
+    }));
+    const stored = await repository.insertCandidates(
+      context.runId,
+      origin,
+      fresh.map((company) => {
+        const domainCanonical = canonicalizeDomain(String(company.domain));
+        const text = discoveryEvidenceText(company);
+        const verdict = setAside.get(domainCanonical);
+        return {
+          companyName: String(company.company_name),
+          domain: String(company.domain),
+          domainCanonical,
+          discoveryPayload: company,
+          evidence: { url: `${DISCOVERY_SOURCE_PREFIX}${domainCanonical}`, text, injectionMatches: scanForPromptInjection(text) },
+          ...(verdict ? { skipReason: verdict.reason } : { priority: industryAffinity(company.industry, icp) }),
+        };
+      }),
+    );
+    const outsideLocation = stored.filter((company) => setAside.get(company.domainCanonical)?.kind === "location").length;
+    const tooLarge = stored.filter((company) => setAside.get(company.domainCanonical)?.kind === "size").length;
+    const summary = {
+      ...filters,
+      locations,
+      start_page: discovery.startPage ?? 1,
+      returned_count: discovery.returnedCount ?? discovery.records.length,
+      total_available: discovery.totalAvailable ?? null,
+      stored_count: stored.length - outsideLocation - tooLarge,
+      outside_location: outsideLocation,
+      too_large: tooLarge,
+    };
+    await repository.addApifyCost(context.runId, discovery.costUsd, discovery.costComplete, jobKey, summary);
+    return {
+      fixture: discovery.runId === undefined && discovery.costUsd === 0,
+      applied_limit: storedLimit,
+      filters_applied: { ...filters, locations },
+      results_returned: summary.returned_count,
+      total_matching_on_linkedin: summary.total_available,
+      skipped_without_website: discovery.skippedNoWebsite ?? 0,
+      skipped_previously_decided: companies.length - fresh.length,
+      skipped_already_in_run: fresh.length - stored.length,
+      set_aside_headquartered_elsewhere: outsideLocation,
+      set_aside_clearly_too_large: tooLarge,
+      stored_count: summary.stored_count,
+      companies: stored.filter((company) => !setAside.has(company.domainCanonical)).map((company) => ({ name: company.companyName, domain: company.domain })),
+      provider_cost_usd: discovery.costUsd,
+      cost_complete: discovery.costComplete,
+    };
+  }
+
+  async function searchContext() {
+    const run = await repository.getRunContext(context.runId);
+    const storedLimit = run.limits.max_candidates;
+    if (!Number.isSafeInteger(storedLimit) || storedLimit <= 0) {
+      throw new Error("Stored candidate limit is invalid");
+    }
+    // Hard filters froze at confirmation, so geography and size come from the
+    // stored ICP, never from the agent or anything it read.
+    const icp = (run.refinedIcp ?? {}) as Partial<RefinedIcp>;
+    return {
+      run,
+      jobKey: `discovery_${run.refillsUsed}`,
+      locations: linkedInLocations(Array.isArray(icp.geography) ? icp.geography.map(String) : []),
+      companySizes: linkedInCompanySizes(String(icp.headcount_range ?? "")),
+      maxChargeUsd: Math.max(0, run.limits.apify_budget_usd - run.apifyCostUsd),
+    };
+  }
 
   const searchCompanies = tool(
     "search_companies",
@@ -152,98 +269,51 @@ export function createLeadAgentToolServer(
         args.purpose,
         args,
         async () => {
-          const run = await repository.getRunContext(context.runId);
-          const jobKey = `discovery_${run.refillsUsed}`;
-          const storedLimit = run.limits.max_candidates;
-          if (!Number.isSafeInteger(storedLimit) || storedLimit <= 0) {
-            throw new Error("Stored candidate limit is invalid");
-          }
-          // Hard filters froze at confirmation, so geography and size come from
-          // the stored ICP, never from the agent or anything it read.
-          const icp = (run.refinedIcp ?? {}) as Partial<RefinedIcp>;
-          const locations = linkedInLocations(Array.isArray(icp.geography) ? icp.geography.map(String) : []);
-          const companySizes = linkedInCompanySizes(String(icp.headcount_range ?? ""));
+          const { run, jobKey, locations, companySizes, maxChargeUsd } = await searchContext();
           const industries = industryIds(args.industries);
-          const keywords = args.keywords.trim().split(/\s+/).filter(Boolean).slice(0, 3).join(" ");
+          const keywords = normalizeKeywords(args.keywords).split(" ").filter(Boolean).slice(0, 3).join(" ");
           if (industries.ids.length === 0 && !keywords) {
             throw new Error(`Choose at least one LinkedIn industry from the list${industries.unknown.length ? ` (not recognised: ${industries.unknown.join(", ")})` : ""}, or give up to 2 keywords`);
           }
-
           const discovery = await discoveryProvider.search({
-            keywords,
-            industryIds: industries.ids,
-            locations,
-            companySizes,
-            limit: storedLimit,
-            maxChargeUsd: Math.max(0, run.limits.apify_budget_usd - run.apifyCostUsd),
-            runId: context.runId,
-            jobKey,
+            keywords, industryIds: industries.ids, locations, companySizes,
+            limit: run.limits.max_candidates, maxChargeUsd, runId: context.runId, jobKey,
           });
-          const excluded = new Set(run.excludedDomains.map((domain) => canonicalizeDomain(domain)));
-          const companies = discovery.records
-            .map((raw) => ({
-              ...raw,
-              domain: raw.domain ?? raw.company_domain,
-            }))
-            .map((record) => stripDiscoveryRecord(record))
-            .filter((record) => typeof record.company_name === "string" && typeof record.domain === "string")
-            .slice(0, storedLimit);
-          const fresh = companies.filter((company) => !excluded.has(canonicalizeDomain(String(company.domain))));
-          const origin = run.refillsUsed === 0 ? "discovery" : `refill_${run.refillsUsed}`;
-          const stored = await repository.insertCandidates(
-            context.runId,
-            origin,
-            fresh.map((company) => {
-              const domainCanonical = canonicalizeDomain(String(company.domain));
-              const text = discoveryEvidenceText(company);
-              const location = typeof company.location === "string" ? company.location : undefined;
-              return {
-                companyName: String(company.company_name),
-                domain: String(company.domain),
-                domainCanonical,
-                discoveryPayload: company,
-                evidence: { url: `${DISCOVERY_SOURCE_PREFIX}${domainCanonical}`, text, injectionMatches: scanForPromptInjection(text) },
-                ...(headquartersOutside(location, locations)
-                  ? { skipReason: `Headquartered in ${location}, outside ${locations.join(" / ")}. Set aside without spending research on it.` }
-                  : {}),
-              };
-            }),
-          );
-          const setAside = new Set(fresh
-            .filter((company) => headquartersOutside(typeof company.location === "string" ? company.location : undefined, locations))
-            .map((company) => canonicalizeDomain(String(company.domain))));
-          const outsideLocation = stored.filter((company) => setAside.has(company.domainCanonical)).length;
-          const summary = {
-            keywords,
-            industries: industries.labels,
-            locations,
-            company_sizes: companySizes,
-            start_page: discovery.startPage ?? 1,
-            returned_count: discovery.returnedCount ?? discovery.records.length,
-            total_available: discovery.totalAvailable ?? null,
-            stored_count: stored.length - outsideLocation,
-            outside_location: outsideLocation,
-          };
-          await repository.addApifyCost(context.runId, discovery.costUsd, discovery.costComplete, jobKey, summary);
+          const result = await ingestDiscovery(run, jobKey, locations, discovery, { keywords, industries: industries.labels, company_sizes: companySizes });
+          return { ...result, requested_limit_ignored: args.requested_limit ?? null, industries_not_recognised: industries.unknown };
+        },
+      ),
+    WRITE_ANNOTATIONS,
+  );
 
-          return {
-            fixture: discovery.runId === undefined && discovery.costUsd === 0,
-            applied_limit: storedLimit,
-            requested_limit_ignored: args.requested_limit ?? null,
-            filters_applied: { industries: industries.labels, keywords, locations, company_sizes: companySizes },
-            industries_not_recognised: industries.unknown,
-            start_page: summary.start_page,
-            companies_returned: summary.returned_count,
-            total_matching_on_linkedin: summary.total_available,
-            skipped_without_website: discovery.skippedNoWebsite ?? 0,
-            skipped_previously_decided: companies.length - fresh.length,
-            skipped_already_in_run: fresh.length - stored.length,
-            set_aside_headquartered_elsewhere: outsideLocation,
-            stored_count: stored.length - outsideLocation,
-            companies: stored.map((company) => ({ name: company.companyName, domain: company.domain })),
-            provider_cost_usd: discovery.costUsd,
-            cost_complete: discovery.costComplete,
-          };
+  const searchJobAds = tool(
+    "search_job_ads",
+    "Search LinkedIn job ads posted in the last month in the confirmed ICP's location, and store the companies behind them. Use it when a must-have requires the company to be hiring for a role: every company found is hiring, and its ads are stored as evidence. Give the role as the job-title words an ad would use (for example \"customer service\") and, optionally, one sector word the ads would contain (for example \"ecommerce\"). Location, the ad cap and the company cap come from the run record; requested_limit is logged but never trusted.",
+    {
+      purpose: z.string().min(1).max(300),
+      role: z.string().min(2).max(60),
+      sector: z.string().max(30).default(""),
+      requested_limit: z.number().int().positive().optional(),
+    },
+    async (args) =>
+      executeLoggedTool(
+        repository,
+        context,
+        "mcp__lead_agent__search_job_ads",
+        args.purpose,
+        args,
+        async () => {
+          const { run, jobKey, locations, maxChargeUsd } = await searchContext();
+          const role = normalizeKeywords(args.role).split(" ").filter(Boolean).slice(0, 4).join(" ");
+          const sector = normalizeKeywords(args.sector).split(" ").filter(Boolean).slice(0, 2).join(" ");
+          if (!role) throw new Error("Give the role as job-title words, for example \"customer service\"");
+          const keywords = [role, sector].filter(Boolean).join(" ");
+          const discovery = await jobAdsProvider.search({
+            keywords, locations, companySizes: [],
+            limit: run.limits.max_candidates, maxChargeUsd, runId: context.runId, jobKey,
+          });
+          const result = await ingestDiscovery(run, jobKey, locations, discovery, { keywords, role, sector, source: "job_ads" });
+          return { ...result, requested_limit_ignored: args.requested_limit ?? null };
         },
       ),
     WRITE_ANNOTATIONS,
@@ -389,13 +459,13 @@ export function createLeadAgentToolServer(
           await repository.saveQualification({
             context,
             status: checked.status,
-            confidence: args.confidence,
+            confidence: checked.confidence,
             fitReasons: attachIds(args.fit_reasons),
             concerns: attachIds(args.concerns),
             hardFilterResults: attachIds(args.hard_filter_results),
             sourceSummary: args.source_summary,
             whyNow: args.why_now,
-            checks: { passed: true, requested_status: args.status, downgrades: checked.downgrades },
+            checks: { passed: true, requested_status: args.status, downgrades: checked.downgrades, adjustments: checked.adjustments },
             modelUsed: STAGE_MODELS.qualify_one,
           });
           return { accepted: true, status: checked.status, downgrades: checked.downgrades };
@@ -493,17 +563,14 @@ export function createLeadAgentToolServer(
     WRITE_ANNOTATIONS,
   );
 
+  const all = [searchCompanies, searchJobAds, scrapeSite, storeExcerpts, recordQualification, recordOutreach, getRunContext];
   return createSdkMcpServer({
     name: "lead_agent",
     version: "0.2.0",
-    tools: [
-      searchCompanies,
-      scrapeSite,
-      storeExcerpts,
-      recordQualification,
-      recordOutreach,
-      getRunContext,
-    ],
+    // A stage sees only its own tools. allowedTools already refused the rest,
+    // but every drafting step still carried search and scrape definitions in
+    // its context, and paid to cache them.
+    tools: onlyTools ? all.filter((item) => onlyTools.includes(`mcp__lead_agent__${item.name}`)) : all,
   });
 }
 

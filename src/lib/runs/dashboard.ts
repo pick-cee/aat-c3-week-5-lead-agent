@@ -7,12 +7,14 @@ export type HardFilterVerdict = { criterion: string; verdict: "pass" | "fail" | 
 
 export type DiscoverySearchSummary = {
   key: string;
+  source: "company_search" | "job_ads";
   keywords: string | null;
   industries: string[];
   locations: string[];
   company_sizes: string[];
   returned_count: number | null;
   stored_count: number | null;
+  set_aside_count: number;
   total_available: number | null;
   start_page: number | null;
   status: string | null;
@@ -61,12 +63,14 @@ function searchesFrom(jobs: RunRow["apify_jobs"]): DiscoverySearchSummary[] {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, job]) => ({
       key,
+      source: job.source === "job_ads" ? "job_ads" as const : "company_search" as const,
       keywords: typeof job.keywords === "string" ? job.keywords : null,
       industries: Array.isArray(job.industries) ? job.industries.map(String) : [],
       locations: Array.isArray(job.locations) ? job.locations.map(String) : [],
       company_sizes: Array.isArray(job.company_sizes) ? job.company_sizes.map(String) : [],
       returned_count: numberOrNull(job.returned_count),
       stored_count: numberOrNull(job.stored_count),
+      set_aside_count: (numberOrNull(job.outside_location) ?? 0) + (numberOrNull(job.too_large) ?? 0),
       total_available: numberOrNull(job.total_available),
       start_page: numberOrNull(job.start_page),
       status: typeof job.status === "string" ? job.status : null,

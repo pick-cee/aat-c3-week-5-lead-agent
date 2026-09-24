@@ -135,3 +135,12 @@ export function assumptionTargets(icp: RefinedIcp, assumption: string): Assumpti
   }
   return guessAssumptionTargets(icp, assumption);
 }
+
+/**
+ * The hard filter that requires the company to be hiring, if any. Company
+ * websites could not prove it: in run 7716f37f it was unknown or failed for
+ * all 29 companies researched, because ads live on LinkedIn and job boards.
+ */
+export function hiringRequirement(hardFilters: string[]): string | null {
+  return hardFilters.find((filter) => /\bhir(?:e|es|ing)\b|\bjob\s+(?:ads?|adverts?|openings?|postings?|listings?|vacanc)|\bopen\s+(?:roles|positions|vacancies)\b|\bvacanc(?:y|ies)\b|\brecruiting\s+for\b/i.test(filter)) ?? null;
+}

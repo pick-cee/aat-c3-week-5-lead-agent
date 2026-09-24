@@ -91,18 +91,31 @@ Apify (company discovery only) · Firecrawl (scraping). TypeScript throughout.
    honoured. A prompt is a request; a handler is a fact. Only a person raises a
    cap: when a run cannot afford its next step it pauses at `awaiting_budget`
    and asks the founder (`DESIGN.md` §13), and the raise is bounded, logged and
-   made through a route, never through a tool.
+   made through a route, never through a tool. Research never spends what
+   drafting the leads already qualified needs, and Finish always drafts every
+   qualified lead, adding only the drafting cost it states on the button first.
+   A run once finished with six leads and no outreach at all.
 
 2. **No tool exists that could break the scope rules.** There is no
    email-finding tool, no email validation tool, no send tool. `Bash`,
    `WebFetch`, `WebSearch`, `Write`, `Edit` and `NotebookEdit` are removed by
    bare name in `disallowedTools`, which takes them out of the model's context.
    An agent with a general HTTP tool makes every other control in this file
-   decorative. Do not add one, for any reason, including debugging.
+   decorative. Do not add one, for any reason, including debugging. `Read` is
+   not enabled either: it could open `.env`. Each stage's tool server carries
+   only that stage's tools. The agent runs in its own folder holding only its
+   skills, with its own empty Claude config (`CLAUDE_CONFIG_DIR`),
+   `strictMcpConfig: true` and `persistSession: false` (`agent-runtime.ts`).
+   Run from the repository, it received this file, the developer's memory and
+   email address and their claude.ai connectors (Gmail included), and ran on
+   their personal Claude login. Never point the agent's `cwd` at the repository.
 
 3. **Contact-shaped fields are stripped at ingest, by allowlist.** Only company
-   name, domain, headcount, industry, location, description and funding survive
-   from a discovery result. A personal email that is never stored cannot be
+   name, domain, headcount band, LinkedIn member count, industry, location,
+   description, specialities, company type, open job ads (title, place, date
+   and public link only) and funding survive from a discovery result. An ad's
+   text and its poster are never kept: an ad can carry a recruiter's email. The member count is what makes a size filter provable; the band is
+   the company's own, often stale, choice. A personal email that is never stored cannot be
    exported, cannot leak into a draft, and cannot appear in a screenshot.
 
 4. **Every claim cites stored evidence.** Fit reasons, concerns and every
@@ -116,7 +129,7 @@ Apify (company discovery only) · Firecrawl (scraping). TypeScript throughout.
 
 5. **Ten is the target, and it is reached by widening the funnel, never by
    lowering the bar.** Over-fetch candidates, qualify strictly, refill up to
-   `limits.max_refills` (two by default) excluding seen domains. A refill may
+   `limits.max_refills` (four by default) excluding seen domains. A refill may
    drop a soft preference and must record that it did. A refill may never relax
    a hard filter. Still short, the run pauses and asks the founder for more
    searches; if they finish instead, it ends `short_of_target` with the real
@@ -149,7 +162,17 @@ Apify (company discovery only) · Firecrawl (scraping). TypeScript throughout.
    never be started.
    The selected actor is `harvestapi/linkedin-company-search` (pay-per-event,
    no LinkedIn login, company pages only; evidence and prices in `DESIGN.md`
-   §13). It replaced a company-list actor that returned zero companies and
+   §13). Briefs with a hiring must-have discover through job ads instead
+   (`curious_coder/linkedin-jobs-scraper`, pay-per-event, $0.001 an ad): company
+   websites cannot prove "hiring for X" (unknown or failed for all 29
+   companies in run 7716f37f), and every company behind an ad is hiring, with
+   the ad as its evidence. Never start an actor that asks for full access to
+   the account; `harvestapi/linkedin-job-search` did, and was not used. The
+   job search cannot page, so repeating its words is refused before any spend.
+   Keywords are normalised before they are compared or sent, and a company
+   search that shares an industry with an earlier one pages past it: two of
+   one run's four searches had rebought the same 50 companies. The Apify cap is
+   $0.60 a run, because the PRD's allowance is $5 per person for the week. It replaced a company-list actor that returned zero companies and
    `apify/google-search-scraper`, which returns web pages rather than
    companies. Pass `maxItems` (input and API level) as the stored candidate
    ceiling reduced to what the remaining Apify budget can pay for, and
@@ -160,8 +183,14 @@ Apify (company discovery only) · Firecrawl (scraping). TypeScript throughout.
    match company names, and the phrases that found 0 and 8 companies found
    59,592 as industries. A company whose record puts its headquarters outside
    every requested location is set aside with that reason before any research
-   is spent on it. One paid search per discovery step is enforced
-   in `reserve_tool_call`. Claim the step's job slot with one conditional update,
+   is spent on it, and so is one with more than twice the headcount ceiling in
+   people listing it on LinkedIn; a low or missing count is always researched.
+   Each search takes a full 50-result page, and a refill is shown what earlier
+   searches produced by industry and repeats what worked; it never wanders into
+   neighbouring service industries. One paid search per discovery step is
+   enforced in `reserve_tool_call`, counting searches that actually started
+   (stored actor run ids), never reservations: the hook reserves before the
+   tool validates its input, so a malformed call once spent a step's search. Claim the step's job slot with one conditional update,
    store the actor run id per discovery/refill step so a timeout resumes instead
    of starting a duplicate paid run, and page forward when a refill repeats the
    same filters. Read cost only after charged events cover every returned
@@ -257,12 +286,19 @@ sticky panel. Every review item offers a way to say it is wrong, not only that
 it is right, and a correction must be able to reach the criteria, since only
 the criteria change the search. When one item is about another (an assumption
 about a criterion), link them and let a click land on the exact place, open for
-editing; never make a founder search a list for it. Never show a raw SDK or
+editing; never make a founder search a list for it. The assumptions a founder
+keeps are passed to the research step as how to read the brief, never as extra
+pass or fail tests. Companies filtered out by their own LinkedIn record are
+shown apart from rejections and say they were never researched; showing them
+as rejections read as money spent on companies that never matched. Approving a
+lead writes its outreach, even on a finished run, and says what that adds. Never show a raw SDK or
 provider error: a stage that hit its own limit reads as a plain reason, and a
 run that cannot afford its next step shows a modal with what ran out, what was
 found so far and what each option allows, never a dead end. A `needs_review`
 lead offers approve and reject right beside the evidence that could not settle
-it. The page-by-page contract is `DESIGN.md` §11.
+it. "Needs you" lists only what is waiting on the founder; a run they stopped
+was their decision and never nags them, whatever it left unreviewed. The
+page-by-page contract is `DESIGN.md` §11.
 
 ## Agent SDK notes that will bite
 
@@ -279,7 +315,17 @@ it. The page-by-page contract is `DESIGN.md` §11.
 - Skills load from the filesystem and need `settingSources` to include
   `'project'`. Setting `skills` adds the `Skill` tool to `allowedTools`
   automatically, but if you also pass an explicit `tools` list, `Skill` has to be
-  in it.
+  in it. `'project'` also loads the instruction files of whatever folder `cwd`
+  is, which is why the agent's `cwd` is its own skills-only folder.
+- Claude Code ignores `ANTHROPIC_API_KEY` from the environment until the key is
+  approved in its config, and silently falls back to whatever login the host
+  has. The runtime writes that approval into the agent's own config dir; with no
+  login at all, every stage fails with "Not logged in".
+- Without `strictMcpConfig: true`, the host's MCP servers and claude.ai
+  connectors are attached to every stage.
+- Most of a stage's cost is context written to cache before the first word.
+  Anything in that context is paid for on every company. Measure with the
+  per-call `usage` on assistant messages, not with the result total.
 - Set `maxTurns` **and** `maxBudgetUsd` on every stage. They are the runtime's
   own hard stops and they do not depend on the agent cooperating.
 - Return `isError: true` from a handler to compose the message the agent reads.
@@ -287,8 +333,8 @@ it. The page-by-page contract is `DESIGN.md` §11.
   continues either way.
 - `readOnlyHint: true` lets read-only tools run in parallel. Keep the annotation
   honest to what the handler does. Every lead-agent tool writes an audit row,
-  so all six use `readOnlyHint: false`; `get_run_context` is read-only only with
-  respect to run data.
+  so all seven use `readOnlyHint: false`; `get_run_context` is read-only only
+  with respect to run data. Each stage's server carries only that stage's tools.
 
 ## Conventions
 

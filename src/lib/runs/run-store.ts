@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
 
-import { APIFY_ACTOR_START_USD, APIFY_COMPANY_RESULT_USD, DEFAULT_RUN_LIMITS, EXTRA_SEARCH_APIFY_USD, LEAD_TARGET, MAX_REFILLS, MAX_REFILLS_CEILING, MAX_RESEARCH_ATTEMPTS, MIN_STAGE_BUDGET_USD, RUNNER_LEASE_SECONDS, STALE_RESEARCH_MINUTES, TEST_EMAIL_COOLDOWN_SECONDS } from "@/lib/constants";
+import { APIFY_ACTOR_START_USD, APIFY_COMPANY_RESULT_USD, DEFAULT_RUN_LIMITS, EXTRA_SEARCH_APIFY_USD, LEAD_TARGET, MAX_DRAFT_ATTEMPTS, MAX_REFILLS, MAX_REFILLS_CEILING, MAX_RESEARCH_ATTEMPTS, MIN_STAGE_BUDGET_USD, RUNNER_LEASE_SECONDS, STALE_RESEARCH_MINUTES, TEST_EMAIL_COOLDOWN_SECONDS } from "@/lib/constants";
 import { computeListQuality } from "@/lib/checks/list-quality";
 import { queryDb, withTransaction } from "@/lib/server/database";
 import { notifyRun } from "@/lib/server/failure-notifier";
 
+import { draftingCost, draftingTopUp } from "./drafting-budget";
+
 export type DiscoveryJob = {
   keywords?: string;
+  source?: string;
   industries?: string[];
   returned_count?: number;
   stored_count?: number;
@@ -83,7 +86,6 @@ const STATUS_FOR_STAGE: Record<RunRecord["stage"], string> = {
   qualify_one: "researching",
   draft_one: "drafting",
 };
-const MAX_DRAFT_ATTEMPTS = 3;
 const NOTE_LABEL = { success: "Completion", failure: "Failure", budget: "Budget request" } as const;
 const DRAFT_EXCERPT_LIMIT = 30;
 
@@ -312,7 +314,7 @@ export class RunStore {
           where run_id=$1
             and (status='discovered'
                  or (status='researching' and (research_started_at is null or research_started_at < now() - make_interval(mins => $3))))
-          order by created_at
+          order by research_priority desc, created_at
           limit $2
           for update skip locked
        )
@@ -658,22 +660,59 @@ export class RunStore {
       `select r.limits, r.agent_cost_usd, r.apify_cost_usd,
               (select value from lead_agent.usage_counters u where u.run_id=r.id and u.scope='run' and u.counter_name='tool_calls_total') tool_calls,
               (select value from lead_agent.usage_counters u where u.run_id=r.id and u.scope='run' and u.counter_name='scrapes_total') scrapes,
-              (select value from lead_agent.usage_counters u where u.run_id=r.id and u.scope='run' and u.counter_name='apify_calls') apify_calls
+              (select count(*) from jsonb_each(coalesce(r.apify_jobs,'{}'::jsonb)) j where jsonb_typeof(j.value)='object' and j.value ? 'id') apify_calls
          from lead_agent.runs r where r.id=$1`,
       [runId],
     );
     const row = result.rows[0];
     if (!row) return null;
     const limits = row.limits;
-    if (limits.agent_budget_usd - Number(row.agent_cost_usd) < MIN_STAGE_BUDGET_USD) return "agent";
+    // Research stops while drafting the leads already found is still paid for.
+    const reserve = stage === "qualify_one" ? (await this.draftingNeed(runId)).usd : 0;
+    if (limits.agent_budget_usd - Number(row.agent_cost_usd) - reserve < MIN_STAGE_BUDGET_USD) return "agent";
     // A step makes several calls; stop a few short rather than mid-company.
     if (Number(row.tool_calls ?? 0) >= limits.max_tool_calls - 6) return "tool_calls";
     if (stage === "qualify_one" && Number(row.scrapes ?? 0) >= limits.max_scrapes_total) return "scrapes";
     if (stage === "discover") {
+      // Searches that ran (stored actor runs), not reservations: see 0009.
       if (Number(row.apify_calls ?? 0) >= limits.max_apify_calls) return "searches";
       if (limits.apify_budget_usd - Number(row.apify_cost_usd) < APIFY_ACTOR_START_USD + APIFY_COMPANY_RESULT_USD) return "apify";
     }
     return null;
+  }
+
+  /** Qualified leads still waiting for outreach, and the most drafting them can cost. */
+  async draftingNeed(runId: string): Promise<{ leads: number; usd: number }> {
+    const result = await queryDb<{ n: number }>(
+      `select count(*)::int n from lead_agent.candidates c
+         join lead_agent.qualifications q on q.candidate_id=c.id and q.status='qualified'
+        where c.run_id=$1 and c.draft_attempts < $2
+          and (select count(*) from lead_agent.outreach_drafts d where d.candidate_id=c.id) < 4`,
+      [runId, MAX_DRAFT_ATTEMPTS],
+    );
+    const leads = result.rows[0]?.n ?? 0;
+    return { leads, usd: draftingCost(leads) };
+  }
+
+  /**
+   * What earlier searches produced, by the LinkedIn industry of the companies
+   * found, so an extra search repeats what worked instead of wandering into
+   * neighbouring industries (run 12f27441 moved from software to staffing).
+   */
+  async discoveryOutcomes(runId: string): Promise<Array<{ industry: string; found: number; fit: number; rejected: number; set_aside: number }>> {
+    const result = await queryDb<{ industry: string; found: number; fit: number; rejected: number; set_aside: number }>(
+      `select coalesce(nullif(c.discovery_payload->>'industry',''),'Not stated') industry,
+              count(*)::int found,
+              count(*) filter (where q.status in ('qualified','needs_review'))::int fit,
+              count(*) filter (where q.status='not_qualified')::int rejected,
+              count(*) filter (where c.status='skipped')::int set_aside
+         from lead_agent.candidates c
+         left join lead_agent.qualifications q on q.candidate_id=c.id
+        where c.run_id=$1
+        group by 1 order by found desc limit 12`,
+      [runId],
+    );
+    return result.rows;
   }
 
   /** Pauses the run and asks the founder. Only a person can raise a cap. */
@@ -682,17 +721,21 @@ export class RunStore {
     const counts = await queryDb<{ qualified: number; pending: number; apify_calls: string | null }>(
       `select (select count(*)::int from lead_agent.qualifications q where q.run_id=$1 and q.status='qualified') qualified,
               (select count(*)::int from lead_agent.candidates c where c.run_id=$1 and c.status in ('discovered','researching')) pending,
-              (select value from lead_agent.usage_counters u where u.run_id=$1 and u.scope='run' and u.counter_name='apify_calls') apify_calls`,
+              (select count(*) from lead_agent.runs r, jsonb_each(coalesce(r.apify_jobs,'{}'::jsonb)) j where r.id=$1 and jsonb_typeof(j.value)='object' and j.value ? 'id') apify_calls`,
       [run.id],
     );
     const { qualified, pending } = counts.rows[0] ?? { qualified: 0, pending: 0 };
     const searching = kind === "searches" || kind === "apify";
     const tally = `${qualified} of ${fresh.target_leads} leads qualified`;
     const waiting = pending ? ` and ${pending} companies still waiting` : "";
+    const drafting = await this.draftingNeed(run.id);
+    const kept = kind === "agent" && fresh.stage === "qualify_one" && drafting.leads
+      ? ` $${drafting.usd.toFixed(2)} is kept back so the ${drafting.leads} qualified lead${drafting.leads === 1 ? "" : "s"} still get${drafting.leads === 1 ? "s" : ""} outreach drafts.`
+      : "";
     const reasons: Record<BudgetKind, string> = {
       searches: `All ${fresh.limits.max_apify_calls} company searches are used with ${tally}. Another search brings up to ${fresh.limits.max_candidates} new companies to research.`,
       apify: `The company-search allowance ($${fresh.limits.apify_budget_usd.toFixed(2)}) is used up with ${tally}.`,
-      agent: `The AI research allowance ($${fresh.limits.agent_budget_usd.toFixed(2)}) is used up with ${tally}${waiting}.`,
+      agent: `The AI research allowance ($${fresh.limits.agent_budget_usd.toFixed(2)}) is used up with ${tally}${waiting}.${kept}`,
       tool_calls: `This run reached its safety limit on research actions with ${tally}${waiting}.`,
       scrapes: `This run reached its limit on website pages read with ${tally}${waiting}.`,
     };
@@ -782,25 +825,43 @@ export class RunStore {
   }
 
   /**
-   * Ends a paused run with what it has. Qualified leads still get their
-   * drafts if the AI allowance allows; otherwise the run finishes as is.
+   * Ends a paused run with what it has, and every qualified lead gets its
+   * outreach. Finishing once skipped drafting whenever the allowance was spent,
+   * so a founder paid for leads and received no emails. When the allowance
+   * cannot cover drafting, finishing adds exactly what it needs; the Finish
+   * button states that amount before it is pressed (draftingTopUp).
    */
   async finishRun(runId: string): Promise<boolean> {
     const run = await this.getRun(runId);
     if (!run || run.status !== "awaiting_budget") return false;
-    const waiting = await queryDb<{ n: number }>(
-      `select count(*)::int n from lead_agent.candidates c join lead_agent.qualifications q on q.candidate_id=c.id and q.status='qualified'
-        where c.run_id=$1 and c.draft_attempts < $2 and (select count(*) from lead_agent.outreach_drafts d where d.candidate_id=c.id) < 4`,
-      [runId, MAX_DRAFT_ATTEMPTS],
-    );
-    const canDraft = run.stage !== "draft_one" && (waiting.rows[0]?.n ?? 0) > 0
-      && run.limits.agent_budget_usd - Number(run.agent_cost_usd) >= MIN_STAGE_BUDGET_USD;
-    await queryDb("update lead_agent.runs set budget_request=null, updated_at=now() where id=$1", [runId]);
-    if (canDraft) {
-      await this.transition(run, "drafting", "draft_one", "Founder chose to finish; drafting outreach for the qualified leads");
+    const need = await this.draftingNeed(runId);
+    if (need.leads === 0) {
+      await queryDb("update lead_agent.runs set budget_request=null, updated_at=now() where id=$1", [runId]);
+      await this.finalize(run);
       return true;
     }
-    await this.finalize(run);
+    const topUp = draftingTopUp(run.limits.agent_budget_usd, Number(run.agent_cost_usd), need.leads);
+    const calls = await queryDb<{ value: string | null }>(
+      "select value from lead_agent.usage_counters where run_id=$1 and scope='run' and counter_name='tool_calls_total'",
+      [runId],
+    );
+    const limits = {
+      ...run.limits,
+      agent_budget_usd: Number((run.limits.agent_budget_usd + topUp).toFixed(2)),
+      // Drafting makes a few calls per lead; it must not pause on a safety cap.
+      max_tool_calls: Math.max(run.limits.max_tool_calls, Number(calls.rows[0]?.value ?? 0) + need.leads * 8 + 6),
+    };
+    const updated = await queryDb(
+      "update lead_agent.runs set limits=$2::jsonb, budget_request=null, updated_at=now() where id=$1 and status='awaiting_budget' returning id",
+      [runId, JSON.stringify(limits)],
+    );
+    if (!updated.rows[0]) return false;
+    const leads = `${need.leads} qualified lead${need.leads === 1 ? "" : "s"}`;
+    await this.transition(
+      run, "drafting", "draft_one",
+      topUp > 0 ? `Founder chose to finish; added $${topUp.toFixed(2)} of AI budget to draft outreach for ${leads}` : `Founder chose to finish; drafting outreach for ${leads}`,
+      { agent_usd_added: topUp, leads: need.leads },
+    );
     return true;
   }
 
@@ -834,11 +895,30 @@ export class RunStore {
     });
     if (!company) return { ok: false };
     await this.refreshQualifiedCount(runId);
-    // A finished run gets outreach written for the lead the founder just approved.
+    // A finished run gets outreach written for the lead the founder just
+    // approved. Its allowance is often spent by then, so approving adds the
+    // drafting cost the button stated; without that the approval only paused
+    // the run to ask for budget again.
     if (decision === "approve") {
       const run = await this.getRun(runId);
       if (run && (run.status === "complete" || run.status === "short_of_target")) {
-        await this.transition(run, "drafting", "draft_one", `Drafting outreach for ${company}, approved by the founder`);
+        const need = await this.draftingNeed(runId);
+        const topUp = draftingTopUp(run.limits.agent_budget_usd, Number(run.agent_cost_usd), need.leads);
+        if (topUp > 0) {
+          const calls = await queryDb<{ value: string | null }>(
+            "select value from lead_agent.usage_counters where run_id=$1 and scope='run' and counter_name='tool_calls_total'",
+            [runId],
+          );
+          const limits = {
+            ...run.limits,
+            agent_budget_usd: Number((run.limits.agent_budget_usd + topUp).toFixed(2)),
+            max_tool_calls: Math.max(run.limits.max_tool_calls, Number(calls.rows[0]?.value ?? 0) + need.leads * 8 + 6),
+          };
+          await queryDb("update lead_agent.runs set limits=$2::jsonb, updated_at=now() where id=$1", [runId, JSON.stringify(limits)]);
+        }
+        await this.transition(run, "drafting", "draft_one",
+          topUp > 0 ? `Drafting outreach for ${company}, approved by the founder; added $${topUp.toFixed(2)} of AI budget for it` : `Drafting outreach for ${company}, approved by the founder`,
+          { agent_usd_added: topUp });
       }
     }
     return { ok: true, companyName: company };

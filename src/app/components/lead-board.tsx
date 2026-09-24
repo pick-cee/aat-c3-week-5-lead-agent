@@ -4,12 +4,12 @@ import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import type { Claim, DashboardCandidate, HardFilterVerdict } from "@/lib/runs/dashboard";
-import { isDiscoverySource, readableCandidateReason } from "@/lib/ui/labels";
+import { isDiscoverySource, money, readableCandidateReason } from "@/lib/ui/labels";
 
 import { Icon } from "./icons";
 import { CandidateStatusPill, FetchStatusPill, Pill } from "./status";
 
-type Tab = "review" | "qualified" | "rejected" | "failed";
+type Tab = "review" | "qualified" | "rejected" | "filtered" | "failed";
 
 function Evidence({ ids, candidate }: { ids: string[]; candidate: DashboardCandidate }) {
   const cited = candidate.excerpts.filter((excerpt) => ids.includes(excerpt.id));
@@ -95,7 +95,7 @@ function Facts({ candidate }: { candidate: DashboardCandidate }) {
  * the target and gets outreach drafted; the decision is stored as the
  * founder's, beside the reasons the checks gave.
  */
-function ReviewDecision({ runId, candidate }: { runId: string; candidate: DashboardCandidate }) {
+function ReviewDecision({ runId, candidate, approveAddsUsd }: { runId: string; candidate: DashboardCandidate; approveAddsUsd: number }) {
   const router = useRouter();
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
@@ -119,12 +119,12 @@ function ReviewDecision({ runId, candidate }: { runId: string; candidate: Dashbo
   }
   return <div className="review-decision">
     <h4>Your call</h4>
-    <p className="muted small">Checked the evidence below? Approving counts {candidate.company_name} toward your target and drafts its outreach. Rejecting keeps it in the rejected list with your reason.</p>
+    <p className="muted small">Checked the evidence below? Approving counts {candidate.company_name} toward your target and writes its outreach drafts{approveAddsUsd > 0 ? `, adding up to ${money(approveAddsUsd)} of AI budget for them (an estimate, not a bill)` : ""}. Rejecting keeps it in the rejected list with your reason.</p>
     <label className="sr-only" htmlFor={`note-${candidate.id}`}>Why (optional)</label>
     <textarea id={`note-${candidate.id}`} rows={2} value={note} onChange={(event) => setNote(event.target.value)} placeholder="Why? Optional, kept with the lead. For example: I know they sell to businesses." />
     {error && <p className="form-error" role="alert">{error}</p>}
     <div className="review-actions">
-      <button type="button" className="button button-primary button-small" disabled={busy !== null} onClick={() => decide("approve")}><Icon name="check" size={14} />{busy === "approve" ? "Approving..." : "Approve as qualified"}</button>
+      <button type="button" className="button button-primary button-small" disabled={busy !== null} onClick={() => decide("approve")}><Icon name="check" size={14} />{busy === "approve" ? "Approving..." : "Approve and write outreach"}</button>
       <button type="button" className="button button-secondary button-small" disabled={busy !== null} onClick={() => decide("reject")}><Icon name="close" size={14} />{busy === "reject" ? "Rejecting..." : "Reject"}</button>
     </div>
   </div>;
@@ -138,7 +138,7 @@ function mainReason(candidate: DashboardCandidate): string {
   return q.concerns[0]?.text ?? q.source_summary;
 }
 
-function LeadCard({ runId, candidate, open }: { runId: string; candidate: DashboardCandidate; open: boolean }) {
+function LeadCard({ runId, candidate, open, approveAddsUsd }: { runId: string; candidate: DashboardCandidate; open: boolean; approveAddsUsd: number }) {
   const q = candidate.qualification;
   const website = `https://${candidate.domain}`;
   const downgrades = q?.checks?.downgrades ?? [];
@@ -158,7 +158,7 @@ function LeadCard({ runId, candidate, open }: { runId: string; candidate: Dashbo
       {candidate.status === "needs_review" && <div className="needs-you">
         <h4><Icon name="alert" size={15} />Why this needs you</h4>
         <ul>{(downgrades.length ? downgrades : ["The research could not settle every must-have from evidence."]).map((reason) => <li key={reason}>{reason}</li>)}</ul>
-        <ReviewDecision runId={runId} candidate={candidate} />
+        <ReviewDecision runId={runId} candidate={candidate} approveAddsUsd={approveAddsUsd} />
       </div>}
       {human && <p className="notice notice-info"><Icon name="info" size={15} />{human.decision === "approve" ? "You approved this lead after review" : "You rejected this lead after review"}{human.note ? `: "${human.note}"` : "."} The checks' original reasons are kept below.</p>}
       {q?.why_now && <p className="why-now"><span>Why now</span>{q.why_now}</p>}
@@ -172,7 +172,7 @@ function LeadCard({ runId, candidate, open }: { runId: string; candidate: Dashbo
         <summary>Sources ({candidate.sources.length})</summary>
         <ul>{candidate.sources.map((source) => <li key={source.id}>
           <FetchStatusPill status={source.fetch_status} />
-          {isDiscoverySource(source.url) ? <span>LinkedIn company record (via Apify)</span> : <a href={source.url} target="_blank" rel="noreferrer">{source.url.replace(/^https?:\/\//, "")}</a>}
+          {isDiscoverySource(source.url) ? <span>{candidate.discovery_payload.discovery_source === "linkedin_job_ads" ? "LinkedIn job ads and company record (via Apify)" : "LinkedIn company record (via Apify)"}</span> : <a href={source.url} target="_blank" rel="noreferrer">{source.url.replace(/^https?:\/\//, "")}</a>}
           {source.fetch_error && <small className="muted">{source.fetch_error}</small>}
         </li>)}</ul>
       </details>
@@ -180,19 +180,21 @@ function LeadCard({ runId, candidate, open }: { runId: string; candidate: Dashbo
   </details>;
 }
 
-export function LeadBoard({ runId, candidates }: { runId: string; candidates: DashboardCandidate[] }) {
+export function LeadBoard({ runId, candidates, approveAddsUsd = 0 }: { runId: string; candidates: DashboardCandidate[]; approveAddsUsd?: number }) {
   const groups = useMemo(() => ({
     review: candidates.filter((candidate) => candidate.status === "needs_review"),
     qualified: [...candidates.filter((candidate) => candidate.status === "qualified")].sort((left, right) => Number(right.qualification?.confidence ?? 0) - Number(left.qualification?.confidence ?? 0)),
-    rejected: candidates.filter((candidate) => candidate.status === "not_qualified" || candidate.status === "skipped"),
+    rejected: candidates.filter((candidate) => candidate.status === "not_qualified"),
+    filtered: candidates.filter((candidate) => candidate.status === "skipped"),
     failed: candidates.filter((candidate) => candidate.status === "failed"),
   }), [candidates]);
-  const initial: Tab = groups.review.length ? "review" : groups.qualified.length ? "qualified" : groups.rejected.length ? "rejected" : "failed";
+  const initial: Tab = groups.review.length ? "review" : groups.qualified.length ? "qualified" : groups.rejected.length ? "rejected" : groups.filtered.length ? "filtered" : "failed";
   const [tab, setTab] = useState<Tab>(initial);
   const tabs: Array<{ key: Tab; label: string; hint: string }> = [
     { key: "review", label: "Needs your review", hint: "A must-have could not be proven. Five minutes of your judgement is worth most here." },
     { key: "qualified", label: "Qualified", hint: "Every must-have proven from cited evidence, with outreach drafts." },
-    { key: "rejected", label: "Rejected", hint: "Kept on purpose, with reasons: a future run skips these instead of paying to reject them again. Companies headquartered outside your locations are set aside here without research." },
+    { key: "rejected", label: "Rejected", hint: "Researched and ruled out, with the evidence. Kept on purpose: a future run skips these instead of paying to reject them again." },
+    { key: "filtered", label: "Filtered out", hint: "LinkedIn returned these for the search, but their own record already shows they miss your criteria: headquarters outside your locations, or far more staff than your limit. They were never researched; each cost only its $0.004 search result." },
     { key: "failed", label: "Couldn't research", hint: "The website could not be read after several tries. The run carried on without them." },
   ];
   const visible = groups[tab];
@@ -200,11 +202,11 @@ export function LeadBoard({ runId, candidates }: { runId: string; candidates: Da
 
   return <section className="lead-board" aria-labelledby="leads-title">
     <div className="segmented" role="tablist" aria-label="Lead groups">
-      {tabs.filter((item) => item.key !== "failed" || groups.failed.length).map((item) => <button key={item.key} type="button" role="tab" aria-selected={tab === item.key} className={item.key === "review" && groups.review.length ? "has-attention" : ""} onClick={() => setTab(item.key)}>{item.label}<span className="count">{groups[item.key].length}</span></button>)}
+      {tabs.filter((item) => (item.key !== "failed" && item.key !== "filtered") || groups[item.key].length).map((item) => <button key={item.key} type="button" role="tab" aria-selected={tab === item.key} className={item.key === "review" && groups.review.length ? "has-attention" : ""} onClick={() => setTab(item.key)}>{item.label}<span className="count">{groups[item.key].length}</span></button>)}
     </div>
     <p className="muted small tab-hint" id="leads-title">{active.hint}</p>
     {visible.length === 0
       ? <div className="empty-state compact"><b>Nothing here{tab === "qualified" ? " yet" : ""}</b><span>{tab === "review" ? "No lead needs your judgement." : tab === "qualified" ? "Qualified leads appear here as research finishes each company." : "Companies land here as research rules them out."}</span></div>
-      : <div className="lead-list">{visible.map((candidate, index) => <LeadCard key={candidate.id} runId={runId} candidate={candidate} open={tab !== "rejected" && tab !== "failed" && index === 0} />)}</div>}
+      : <div className="lead-list">{visible.map((candidate, index) => <LeadCard key={candidate.id} runId={runId} candidate={candidate} approveAddsUsd={approveAddsUsd} open={(tab === "review" || tab === "qualified") && index === 0} />)}</div>}
   </section>;
 }

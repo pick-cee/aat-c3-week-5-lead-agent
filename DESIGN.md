@@ -56,7 +56,7 @@ leads over a larger weak list. Both hold, because the target is reached by
 - Discovery over-fetches: the candidate pool is three times the target.
 - Qualification is strict and evidence-based. `needs_review` never counts.
 - Short of ten? A **refill** runs another discovery inside the remaining tool
-  budget, excluding domains already seen. Up to `limits.max_refills` (two by
+  budget, excluding domains already seen. Up to `limits.max_refills` (four by
   default).
 - A refill may drop a **soft preference**, and that is recorded on the run.
   A refill may never relax a **hard filter**. Hard filters freeze the moment a
@@ -178,9 +178,27 @@ choosing well. Three layers, in the order the SDK evaluates them.
 validation tool, no send tool. Built-ins that could route around the tool
 surface are removed by bare name in `disallowedTools`, which takes them out of
 the model's context entirely: `Bash`, `WebFetch`, `WebSearch`, `Write`, `Edit`,
-`NotebookEdit`. The agent's entire reach is the six tools in §8 plus `Read` and
-`Skill`. An agent with a general HTTP tool makes every other control here
-decorative.
+`NotebookEdit`. Each stage sees only its own tools from §8 plus `Skill`; the
+stage's in-process server is built with just those tools, so drafting cannot
+even see search or scrape. `Read` was also enabled at first. It could open any
+file on the host, `.env` included, on the say-so of a scraped page, and the
+skills never needed it, so it is gone. An agent with a general HTTP tool makes
+every other control here decorative.
+
+**Layer 0, the agent's world is its own.** Every stage runs in a folder that
+holds only the five skills, copied from `.claude/skills` once per process
+(`agent-runtime.ts`), with an empty Claude config of its own
+(`CLAUDE_CONFIG_DIR`), `strictMcpConfig: true` and `persistSession: false`. Run
+from the repository with the host's config, a stage on a developer's machine
+received AGENTS.md (the coding agent's instructions, about 4,200 words), the
+developer's session memory and email address, their claude.ai connectors
+(Gmail, Google Drive, Calendar) and 19 unrelated skills, all measured on
+2026-09-24. It also ran on the developer's personal Claude login rather than the
+project key: Claude Code ignores `ANTHROPIC_API_KEY` from the environment until
+the key is approved in its config, so the runtime writes that approval (the
+key's last 20 characters, as Claude Code itself stores) into its own config.
+Without it, a host with no personal login (Vercel) reports "Not logged in" on
+every stage.
 
 **Layer 2, a `PreToolUse` hook.** Hooks run before deny rules, ask rules,
 permission mode and allow rules, and a hook deny holds even in
@@ -280,12 +298,14 @@ did the work honestly and the evidence did not support ten.
 `id` · `run_id` · `company_name` · `domain` · `domain_canonical` ·
 `origin` (`discovery` or `refill_<n>`) · `discovery_payload jsonb` ·
 `status` · `research_attempts int` · `draft_attempts int` · `skip_reason` ·
-`research_started_at` · `created_at`
+`research_started_at` · `research_priority smallint` · `created_at`
 
-`skipped` with a `skip_reason` marks a company set aside without research, for
-example because its discovery record shows headquarters outside every requested
-location (§7.2). `research_started_at` lets a step tell a company whose research
+`skipped` with a `skip_reason` marks a company set aside without research,
+because its discovery record shows headquarters outside every requested
+location, or far more people on LinkedIn than the headcount ceiling (§7.2). `research_started_at` lets a step tell a company whose research
 died with its runner from one another step is still researching.
+`research_priority` orders the research queue (§7.3): how well the company's own
+LinkedIn industry matches the criteria. It orders, it never excludes.
 
 Both attempt counters stop at three. A company whose research fails three times
 is marked `failed`; a qualified lead whose drafts fail validation three times
@@ -320,9 +340,15 @@ Labelled `E1…En` per candidate when passed to the agent. The model never sees 
 UUID and so cannot fabricate a plausible one.
 
 `E1` is always the discovery record, written at ingest from allowlisted fields
-only (size band, headquarters, industry, description). Company size and
-headquarters are hard filters in most ICPs and a homepage rarely states them;
-without a citable record every lead ended `needs_review` on "unknown" size.
+only: how many people on LinkedIn list the company as their employer, the size
+band the company chose for its page, headquarters, industry, company type,
+specialities and description. Company size and headquarters are hard filters in
+most ICPs and a homepage rarely states them; without a citable record every lead
+ended `needs_review` on "unknown" size. The size band alone did not fix that:
+it is the company's own choice and often years stale (WhatsApp: "51-200", with
+6,083 people listing it), and a band like 51-200 can never prove "10 to 100".
+In run 12f27441 every company that passed the type filter ended in review on
+size. The member count is a number the agent can cite.
 Later labels are appended per candidate under an advisory lock. The first
 version numbered every page from `E1` with an upsert, so storing a second page
 silently replaced the text a first-page citation pointed at.
@@ -436,6 +462,28 @@ to the wrong place. `assumption_links` extends the guide's ICP shape the way
 `assumptions` does; the skill text is unchanged and the instruction lives in the
 stage prompt.
 
+The prompt also asks for criteria that evidence can settle. Every hard filter
+must be provable for a typical company from its LinkedIn record or its own
+website. A condition that can only be shown by absence ("independent, not a
+subsidiary") goes in disqualifiers in its positive form ("Subsidiary of a larger
+company"), which rejects only when evidence shows it: in run 12f27441 the
+must-have "independent company" was `unknown` for all 48 companies researched,
+because no page states that it has no parent. `industries` names what the
+companies are, never the problem they have: that run's criteria listed
+"Business Process Outsourcing" for SaaS companies with manual processes, and
+discovery followed it into outsourcing firms. Criteria are written as plain
+statements, without notes on how they will be proven.
+
+When the objective asks for companies hiring for a role, the criteria carry one
+hard filter written as "Hiring for <role> roles". That wording is what
+discovery recognises (`hiringRequirement`) to search job ads (§7.2), and the ads
+are the evidence that settles it.
+
+Assumptions the founder keeps (marked right, changed, or accepted by approving)
+are passed to every research step as how the founder wants the brief read
+(§7.3). Removed ones are not. They guide interpretation; they are never extra
+pass or fail tests and never stand in for evidence.
+
 Constraints checked in code, not asked for politely: at least one hard filter;
 geography, company type and headcount range either present or explicitly listed
 as an assumption; no hard filter that no discovery field can express.
@@ -444,7 +492,22 @@ The run moves to `awaiting_icp_confirmation`. **No paid tool has run yet.**
 
 ### 7.2 `discover`
 
-The agent calls `search_companies` once and chooses the **LinkedIn industries**
+There are two searches, and the brief decides which one the prompt steers the
+agent to. A brief with a hiring must-have searches **job ads** (`search_job_ads`,
+§8.1): LinkedIn job ads for the role in the ICP's location from the last month.
+Every company found is hiring by construction, and its ads (title, place, date
+and a public link) are stored in `E1` as the evidence for that must-have.
+Company websites could not prove it: in run 7716f37f ("UK e-commerce brands,
+20 to 200 staff, hiring customer support roles") the must-have was unknown or
+failed for all 29 companies researched, although the research step opened
+every brand's careers page, because ads live on LinkedIn and job boards. The
+ad search takes the role as job-title words and, optionally, one sector word
+("customer service ecommerce"): LinkedIn's public job search ignores the
+industry filter, but its keywords match the whole ad, so a sector word steers
+to that kind of company. The same words would return the same ads, so a repeat
+is refused before any spend and the agent varies the role title instead.
+
+Every other brief searches company records. The agent calls `search_companies` once and chooses the **LinkedIn industries**
 (1 to 4 exact names from the 434-industry taxonomy in
 `src/lib/providers/linkedin-industries.ts`) and, optionally, at most two keywords.
 The prompt lists industries matched to the ICP first and then every valid name.
@@ -466,11 +529,28 @@ researching it costs a full AI step to reject. Unknown headquarters are
 researched, not guessed away. The UK SaaS test returned US companies with London
 offices as its first five results, which is why this exists.
 
+Size works the same way. A company with more than twice the ICP's headcount
+ceiling in people listing it as their employer on LinkedIn
+(`HEADCOUNT_SET_ASIDE_FACTOR`) is set aside with that number as its reason
+("6,083 people on LinkedIn list this company as their employer, more than 2
+times your limit of 100"). LinkedIn's size filter uses the company-chosen band,
+so popular companies with stale bands dominate the first pages. Replaying run
+12f27441's first search, 24 of 30 companies were set aside this way at $0.004
+each instead of about $0.10 of research each, and the six researched produced
+the same one lead the founder had approved by hand. Only the ceiling is used:
+LinkedIn undercounts small companies, so a low count proves nothing, and a
+missing count is researched.
+
 "Once" is enforced, not requested. `reserve_tool_call` refuses a second paid
-search in the same discovery step (`apify_calls >= refills_used + 1`). Resuming
-an actor run that already started for the current step is allowed and not
-counted, because it does not start a paid run. Run 815b1dda showed why: three
-Apify reservations for one executed search spent both refills before either ran.
+search in a discovery step whose job record already holds an actor run id, and
+refuses any search once the stored actor runs reach `max_apify_calls`. Resuming
+an actor run that already started for the current step is allowed, because it
+does not start a paid run. Run 815b1dda showed why a cap was needed: three
+reservations for one executed search spent both refills before either ran. The
+first cap counted reservations, and the hook reserves before the tool validates
+its input, so in run 12f27441 one malformed call that never ran left the count a
+step ahead and the first extra search was refused as "already searched". Since
+migration 0009 the cap reads the searches that actually started.
 
 Candidates are deduped by `domain_canonical` against everything already seen in
 the run, including previous refills, and against `runs.excluded_domains`. A
@@ -478,8 +558,32 @@ refill that repeats the same keywords and filters starts from the next LinkedIn
 results page, so it does not pay for the same companies twice. Companies whose
 headquarters match the location filter are stored, and therefore researched,
 first; LinkedIn's location filter matches any office, and dropping the rest on a
-guess about what the hard filter means would lose real evidence. A refill prompt
-lists every earlier search with its counts so the agent broadens deliberately.
+guess about what the hard filter means would lose real evidence. Each search
+takes a full LinkedIn page (`max_candidates` 50): paging moves 50 results at a
+time, so taking 30 skipped 20 companies per page.
+
+Two of run 7716f37f's four searches bought the same 50 companies again. One
+passed its keywords as the two characters `""`, which read as new filters and
+restarted at page one; the other added industries to one it had already used
+("Retail"), and LinkedIn ranked the same 50 companies first. Keywords are now
+normalised (quotes and punctuation removed) before they are compared or sent,
+and a search that shares any industry with an earlier one, with the same
+place, size and keywords, starts after the pages already bought. The prompt
+also asks for the most specific industries: a broad parent such as "Retail"
+brought trade bodies and galleries (British Fashion Council, Saatchi Gallery).
+
+Industries are chosen by what the companies are or sell, never by their problem
+or the services they might buy, and industries named for services (consulting,
+staffing, outsourcing, IT services, custom software development) only when the
+ICP's companies are such firms. A refill prompt lists every earlier search with
+its counts and what it produced by each company's LinkedIn industry (found, fit
+or in review, rejected after research, set aside), and says that repeating the
+same industries continues to the next page. The first refill prompt said "use
+different or broader industries": run 12f27441 had 115,912 matches and had seen
+30, and its extra search moved from software into staffing and outsourcing,
+where every company failed "B2B SaaS". The industry suggestions also ignore
+size, place and ownership words from the hard filters, which had suggested
+"Insurance and Employee Benefit Funds" from "Employee headcount".
 
 A step that ends with no new companies moves straight to the next refill, or,
 once `limits.max_refills` are used, pauses and asks the founder (§13).
@@ -499,8 +603,27 @@ context. The agent then has `scrape_site`, `store_excerpts` and
 `record_qualification`, and reads more pages only if a must-have is still
 unproven, within `limits.max_scrapes_per_company` (the homepage counts). The
 prompt carries the discovery record as `E1` inside an untrusted envelope, the
-exact text of every hard filter, and the rules the checks apply, including the
-confidence rule, so the agent is not silently downgraded by a rule it never saw.
+exact text of every hard filter, the assumptions the founder kept (§7.1), and
+the rules the checks apply, including the confidence rule, so the agent is not
+silently downgraded by a rule it never saw. For size it says: a member count
+inside the range is a pass citing `E1`; a count above it is a fail unless the
+company's own pages state a size inside the range; a count below it proves
+nothing, because many staff are not on LinkedIn; and a size band that straddles
+the range is not a reason for `unknown` when the count settles it.
+
+When `E1` lists open job ads, they are the evidence for a hiring must-have and
+the prompt says so, so research no longer spends pages hunting careers pages.
+
+The queue is ordered by `research_priority`, then discovery order: companies
+whose own LinkedIn industry matches the criteria are researched first
+(`industryAffinity`). A run's budget covers part of what a search returns (27
+companies to research, 8 researched in the replay below), and discovery order
+had a warehousing firm and a gambling job board taking slots ahead of fashion
+brands for an e-commerce brief.
+
+Research only spends what drafting the leads already qualified does not need
+(`DRAFT_RESERVE_PER_LEAD_USD` per lead, §13), so a run that runs out of
+research money can still write every lead's outreach.
 
 The judgement must return, per hard filter, a verdict and the excerpts behind
 it. Then §10.1 runs in code. A step that ends without a recorded decision counts
@@ -522,11 +645,17 @@ return neither, so the agent had no labels to cite. A drafting failure is now
 isolated to its lead (`draft_attempts`, at most three) instead of failing the
 run.
 
+Until 2026-09-24 no run had ever saved a draft. Every run stopped or ran out of
+budget before drafting, and when one was replayed for real, its drafting step
+spent $0.13 on context before writing a word, against a $0.10 stage cap, so it
+could never have finished. In the isolated runtime (§4) the same leads drafted
+all four messages for $0.045 and $0.072; the stage cap is now $0.25.
+
 ---
 
 ## 8. Tools
 
-Six, on one in-process SDK MCP server. Every one writes a `tool_calls` row
+Seven, on one in-process SDK MCP server, each stage seeing only its own. Every one writes a `tool_calls` row
 before it returns, success or failure.
 
 ### 8.1 `search_companies`
@@ -546,6 +675,9 @@ collect them. It needs no LinkedIn login and returns company pages only.
   overlaps (50-500 becomes 51-200 and 201-500, not 11-50).
 - Result limit comes from the run record and is clamped in the handler. An
   argument from the agent asking for more is logged and ignored.
+- Companies the record already rules out (headquarters elsewhere, or clearly
+  too large by member count) are stored as `skipped` with the reason and never
+  researched; the result reports how many (§7.2).
 - Companies with no usable website are counted and skipped: without a domain
   there is nothing to research. LinkedIn redirect wrappers are unwrapped and
   social-profile URLs are rejected as websites.
@@ -553,8 +685,10 @@ collect them. It needs no LinkedIn login and returns company pages only.
   actor starts; the first version read then wrote, which let two concurrent
   handlers both start a paid run.
 - **Contact-shaped fields are stripped at ingest** by an allowlist: only
-  company name, domain, headcount, industry, location, description and funding
-  survive into `discovery_payload`. Anything resembling a personal email or
+  company name, domain, headcount band, LinkedIn member count, industry,
+  location, description, specialities, company type, open job ads (`hiring`:
+  title, place, date, public link), the discovery source and funding survive
+  into `discovery_payload`. Anything resembling a personal email or
   phone number never reaches the database. A field that is not stored cannot be
   exported.
 - The actor's own cost is read from the run and written to `tool_calls.cost_usd`
@@ -562,6 +696,30 @@ collect them. It needs no LinkedIn login and returns company pages only.
 - `readOnlyHint: false`. Discovery writes candidates, tool-call logs and run
   cost, so marking it read-only would make parallel execution unsafe and would
   misdescribe the handler.
+
+### 8.1b `search_job_ads`
+
+LinkedIn job ads through `curious_coder/linkedin-jobs-scraper` (§13), for briefs
+with a hiring must-have (§7.2).
+
+- Input from the agent: `purpose`, `role` (job-title words, at most four),
+  optional `sector` (at most two words) and a `requested_limit` that is logged
+  and ignored. Location comes from the confirmed ICP; the window is the last
+  month (`APIFY_JOB_ADS_POSTED_WITHIN`); the ad cap is 100 per search, reduced to
+  what the remaining Apify budget can pay for; the company cap is
+  `limits.max_candidates`.
+- One company per website. A careers site (careers.next.co.uk) resolves to the
+  company's domain. Kept per company: name, domain, LinkedIn member count,
+  industry, headquarters from the company address, description, and up to three
+  ads as title, place, date and a clean public link (`hiring`). The ad text and
+  the poster are never kept: an ad can carry a recruiter's name and email.
+- The same set-asides as company search apply (headquarters elsewhere, clearly
+  too large), then the same candidate insert, `E1` record, cost record and audit
+  row, through one shared ingest function.
+- It is a paid search under the same guard as `search_companies`: one per
+  discovery step, counted toward `max_apify_calls` (migration 0010). The same
+  keywords and place as an earlier job search in the run are refused before any
+  spend, because this actor cannot page.
 
 ### 8.2 `scrape_site`
 
@@ -611,7 +769,10 @@ write path. Its audit row is still a database mutation, so its MCP annotation is
 ## 9. Skills
 
 Five, in `.claude/skills/`, loaded with `settingSources: ['project']` and an
-explicit `skills` list. Each is derived from its asset doc.
+explicit `skills` list. Each is derived from its asset doc. At run time they are
+copied into the agent's own folder (§4, Layer 0) and loaded from there, and
+`outputFileTracingIncludes` ships them with the build, because nothing imports
+them and the build would otherwise leave them out.
 
 | Skill                  | Model-invoked | Backed by code                 |
 | ---------------------- | ------------- | ------------------------------ |
@@ -646,12 +807,15 @@ Run after `record_qualification`, before the row is accepted.
 | Hard filters                | Every hard filter has a verdict; `unknown`, or a `pass`/`fail` with no cited excerpt, is unproven                         |
 | Unproven forces review      | A `qualified` claim with any unproven filter becomes `needs_review`. A `not_qualified` claim stays rejected only if a `fail` is cited; otherwise it too becomes `needs_review` |
 | Qualified requires evidence | `qualified` needs every hard filter proven `pass`, at least two cited fit reasons, and at least one read page of the company's own website (the discovery record does not count) |
-| Confidence sanity           | For `qualified`: confidence above 0.8 with any concern, or below 0.4, forces `needs_review`                    |
+| Confidence sanity           | For `qualified`: confidence below 0.4 forces `needs_review`; confidence above 0.8 alongside any concern is lowered to 0.8 and the correction stored in `checks.adjustments` |
 | Invented figures            | Any number in a fit reason or concern that appears in no cited excerpt and not in the confirmed criteria is a hard failure |
 
 Every downgrade is stored in `qualifications.checks.downgrades` with a
 plain-language reason, and the review screen shows it under "Why this needs
-you". The confidence rule no longer applies to rejections: a confident
+you". A very high confidence alongside recorded concerns used to force review
+as well. In the 2026-09-24 replay that sent Sofa Club to review with every
+must-have proven from cited evidence; the contradiction is in the score, not
+the evidence, so the score is corrected and the lead stands. The confidence rule no longer applies to rejections: a confident
 rejection with concerns is the normal shape of a rejection, and sending those to
 review spent the founder's attention on companies already ruled out.
 
@@ -688,8 +852,12 @@ button, "New research", and four destinations: Overview, Research runs,
 Notifications, Recycle bin. No destination appears twice. On a phone the
 sidebar becomes a menu.
 
-**Overview.** "Needs you" first: runs waiting for approval, stopped runs, and
-finished runs with leads to review, each with the one action that resolves it.
+**Overview.** "Needs you" first: runs waiting for approval, runs paused for a
+budget decision, runs that failed, and finished runs with leads to review, each
+with the one action that resolves it. A run the founder stopped never appears
+there, even with leads left to review: stopping was their decision, not a task.
+It stays under Stopped in Research runs, reading "Stopped by you", and its
+leads can still be reviewed from its page.
 Then four tiles that link to filtered history (waiting for approval, running
 now, qualified leads, spend this month with Apify billed and the AI estimate
 labelled separately), then the five most recent runs with delete.
@@ -709,8 +877,10 @@ shows the run's recipient with a Change link while the run is unfinished.
 export buttons. It quotes the brief back and reviews every assumption the agent
 made before the criteria.
 
-Assumptions are guesses that fill gaps in the brief. On their own they change
-nothing about the search; only the criteria do. So under each assumption sit
+Assumptions are guesses that fill gaps in the brief. They do not change the
+search or the pass and fail tests; only the criteria do. The ones the founder
+keeps do reach the research step, as how to read the brief (§7.1). So under
+each assumption sit
 the criteria and fields it affects (§7.1), each a button: clicking one scrolls
 to that exact criterion or field, outlines it, opens it for editing with the
 full text visible, and shows which assumption is being fixed with a "Back to
@@ -732,7 +902,9 @@ The founder can edit each field and criterion in place, move a criterion
 between Must have and Nice to have, remove or add one. The approval area comes
 last, in normal page flow, after everything it summarises: how Koya will search
 (the exact LinkedIn location and size filters the handler will apply, warning
-when a size cannot be read), what approving allows (both caps, the run's email,
+when a size cannot be read; for a brief with a hiring must-have, that job ads
+from the last month will be searched in the job location, with size and
+headquarters checked from each company's record), what approving allows (both caps, the run's email,
 nothing sent), and one button: "Approve and start research". It was sticky at
 first and covered the criteria being reviewed. The earlier checkbox-plus-button
 double confirmation is gone. "Discard" moves the run to the recycle bin.
@@ -751,19 +923,34 @@ opens: what ran out in one sentence, qualified so far against target, AI
 research used (estimate) and company search used (real) against their caps,
 searches used, and two options, each spelled out as more searches with their
 real-spend ceiling and more AI research labelled as an estimate. "Add budget
-and keep going" resumes; "Finish with N leads" drafts what was found and ends.
+and keep going" resumes. "Finish and write outreach for N leads" always drafts
+every qualified lead and then ends; when the AI allowance cannot cover it, the
+modal says beforehand how much finishing adds ("adding up to $0.73 of AI budget
+for them"). It once read "Finish with 6 leads", skipped drafting because the
+allowance was spent, and delivered six leads with no outreach.
 Closing the modal leaves a banner with a "Decide" button, and the run appears
 under Needs you on the overview. The founder's email says a decision is
 needed, not that the run failed.
 
 **Leads.** Tabs, with Needs your review first because that is where five
 minutes of human judgement is worth most, then Qualified, Rejected and
-Couldn't research. A needs-review card ends with "Approve as qualified" and
-"Reject", plus an optional note; the decision is stored as the founder's
-(§6.5), an approved lead counts toward the target and gets outreach drafts (a
-finished run reopens drafting for it), and the card shows "Approved by you" or
-"Rejected by you" with the note. Companies set aside before research (for
-example headquartered elsewhere) sit in Rejected with that reason. A lead card
+Couldn't research, and Filtered out when there are any. A needs-review card
+ends with "Approve and write outreach" and "Reject", plus an optional note; the
+decision is stored as the founder's (§6.5), an approved lead counts toward the
+target and gets outreach drafts, and the card shows "Approved by you" or
+"Rejected by you" with the note. On a finished run, approving reopens drafting
+for that lead and adds its drafting cost when the allowance is spent; the card
+states that amount before the click. Without it, an approval on a spent run
+only paused the run to ask for budget again. Drafts appear on each qualified
+lead's card and in the outreach pack export.
+
+Rejected holds only companies that were researched and ruled out. Filtered out
+holds companies LinkedIn returned but whose own record already misses the
+criteria (headquarters elsewhere, far larger than the limit), with the reason
+and a note that they were never researched and cost only their $0.004 search
+result. They used to sit in Rejected, which read as research spent on companies
+that never matched the brief, and they no longer count as checked or rejected in
+the progress tally; each search line shows how many it filtered out. A lead card
 shows why it needs review, `why_now`, the
 must-have checklist with the evidence behind each verdict, fit reasons and
 concerns that open to the exact excerpt and source, the outreach drafts with a
@@ -857,12 +1044,18 @@ reputation:
 | `apify/google-search-scraper` | For "account executive": Wikipedia, Investopedia, Indeed, LinkedIn Jobs, YouTube, ZipRecruiter. Always returns pages, almost never companies, and every non-company costs a research step to reject | Replaced |
 | `harvestapi/linkedin-company-search` | 5 real companies with website, size band, headquarters, industry and description in 5.4s; 1,464 matches for "SaaS" in the United Kingdom at 51-500 people. 1,630 users in 30 days, 1.3M runs, rated 5.0 | Selected |
 | `compass/crawler-google-places` | Strong for local businesses, but returns phone and contact add-ons and cannot filter by headcount | Not used |
+| `curious_coder/linkedin-jobs-scraper` | For hiring briefs. Three capped runs of 3 to 5 ads ($0.003 to $0.005): title, place, date, company website, HQ address, LinkedIn member count, industry. "customer service ecommerce" in the UK returned Trtl (31 people) and Jaded London (100), both clean fits. 17,657 users in 30 days, 4.0M runs, rated 4.6. Pay-per-event, $0.001 per ad on the team's tier | Selected for job ads |
+| `harvestapi/linkedin-job-search` | Same vendor as the company search, supports industry ids; refused to run without "full access to your account", which a shared paid team account should not grant | Not used |
 
 It is pay-per-event, never rental. On the team's Starter plan (Apify's BRONZE
 tier) it charges $0.001 per actor start and $0.004 per full company record; the
-one paid validation returned 5 companies for exactly $0.021. A 30-company
-discovery costs about $0.12, so the initial search and both refills fit inside
-the $0.50 cap.
+one paid validation returned 5 companies for exactly $0.021. A 50-company
+search costs about $0.20 and a 100-ad job search about $0.10. The cap is $0.60
+per run: the PRD's Apify allowance is $5 per person for the whole week, and one
+run had spent $0.71, $0.40 of it on duplicate pages. Three company searches or
+six job searches fit; a run that needs more asks. Searches are the cheap part
+now that companies the record rules out are set aside at $0.004 or $0.001 each;
+research is the expensive part.
 
 Every call is bounded three ways. `maxItems` in the input and at API level is
 the stored candidate cap, reduced to what the remaining Apify budget can pay for
@@ -903,22 +1096,42 @@ Limits, all on the run record, all enforced by the hook:
 
 | Limit                     | Default                       |
 | ------------------------- | ----------------------------- |
-| `max_candidates`          | 30                            |
-| `max_apify_calls`         | 3 (initial plus two refills)  |
-| `max_refills`             | 2                             |
+| `max_candidates`          | 50 (one LinkedIn result page) |
+| `max_apify_calls`         | 5 (initial plus four refills) |
+| `max_refills`             | 4                             |
 | `max_scrapes_total`       | 90                            |
 | `max_scrapes_per_company` | 3 (the server's homepage read counts) |
 | `max_tool_calls`          | 250                           |
 | `max_turns` per stage     | 8, except `qualify_one` at 10 |
-| stage budget              | `qualify_one` $0.25, others $0.10 to $0.15, never above what the run has left |
+| stage budget              | `qualify_one` and `draft_one` $0.25, others $0.10 to $0.15, never above what the run has left |
+| drafting reserve          | $0.12 per qualified lead, kept back from research |
 | `agent_budget_usd`        | 3.00 per run                  |
-| `apify_budget_usd`        | 0.50 per run                  |
+| `apify_budget_usd`        | 0.60 per run                  |
 
 Sized from run 6cd3a95a: about 8 tool calls, 2 scrapes and $0.10 of AI per
 researched company, and $0.06 to $0.12 per successful research stage. The old
 $0.12 stage budget left no room for one corrected attempt, 120 tool calls ran
 out after 12 companies, and $2.00 could not research a 30-company pool and draft
 ten leads.
+
+Measured again on 2026-09-24 in the isolated runtime (§4), replaying run
+12f27441's brief on the same 30 companies: $0.064 of AI per researched company
+(was about $0.10, much of it context that was never the agent's: AGENTS.md,
+host memory, unrelated skills and tools) and $0.045 to $0.072 per drafted lead.
+Criteria, 6 companies researched and one lead drafted took 5.4 minutes and $0.47
+of AI.
+
+Replaying run 7716f37f's brief (UK e-commerce brands, 20 to 200 staff, hiring
+customer support roles) through job-ad discovery on 2026-09-24: one search of
+100 ads for $0.099 gave 83 companies, 23 filtered out as far too large and 27
+to research. Of the 8 researched, the hiring must-have passed for all 8 (it
+passed for none of 29 before); 2 qualified with all four drafts, 1 more had
+every must-have proven and went to review only on the confidence rule since
+changed (§10.1), and 5 were correctly rejected as not e-commerce (a 3PL, a
+gambling job board, a recruiter, a food manufacturer, a trade supplier). $0.76
+of AI and 9.8 minutes in total, against $3.01, $0.71 of Apify, 25 minutes and
+no qualified lead in the original run. Research order (§7.3) and the confidence
+change came after this replay and are not yet measured end to end.
 
 **Running out asks; it does not stop.** Before every step the runner checks
 whether the run can afford it (`budgetShortage`). If not, and when searches are
@@ -928,11 +1141,14 @@ far, AI and company-search spend against their caps, searches used, and two
 options (for example "+2 searches and +$2.00 AI" or "+1 search and +$1.00 AI"),
 each shown as a ceiling with its real-spend part labelled. "Add budget and keep
 going" raises the caps on the run record and resumes; "Finish" drafts outreach
-for the qualified leads if the AI budget allows and ends. Only this person-made
+for every qualified lead and ends, adding exactly the drafting cost the
+allowance cannot cover (`draftingTopUp`, shown on the button first). Research
+never spends that money in the first place: `budgetShortage` holds back the
+drafting reserve for the leads already qualified. Only a person-made
 decision ever raises a cap, bounded per request (at most 4 searches and $5 of
 AI) and in total (`MAX_REFILLS_CEILING`), and it is logged as an event. The
 agent still cannot. An extra search adds its Apify ceiling
-(`EXTRA_SEARCH_APIFY_USD`, $0.15: 30 companies at $0.004 plus a start), and the
+(`EXTRA_SEARCH_APIFY_USD`, $0.21: 50 companies at $0.004 plus a start), and the
 tool-call and scrape caps grow with the AI budget they protect.
 
 A stage that hits its own budget used to surface the SDK's raw text ("Claude
@@ -976,7 +1192,12 @@ founder reads a plain reason.
    URL can read, create, approve and delete runs. Before sharing a public link,
    put the deployment behind access control (Vercel deployment protection or a
    workspace password). Adding that is a deployment decision, not a per-run one.
-10. **Notification settings are workspace-wide**, like everything else. The
+10. **The agent cannot see the host.** It runs in its own folder with its own
+   empty config (§4, Layer 0): no `Read` tool, no repository files, no host
+   memory or account details, no MCP servers but its own. On a developer
+   machine it had been receiving the developer's email address and claude.ai
+   connectors, including Gmail.
+11. **Notification settings are workspace-wide**, like everything else. The
    test-email endpoint sends only to the saved address and reserves a 60-second
    cooldown slot atomically before sending, so it cannot be used as a relay for
    arbitrary recipients.
@@ -996,6 +1217,27 @@ The seven scenarios from the brief, plus what each is really testing.
 | 5   | Lead qualification | Decisions rest on evidence            | Status, confidence, fit reasons, concerns and source context present; every reason cites an excerpt                  |
 | 6   | Outreach drafting  | No invented facts                     | Every personalised line traces to a cited excerpt; copy checks pass                                                  |
 | 7   | Supabase logging   | The work is reviewable                | Run, leads and tool calls all present and sufficient to reconstruct the run                                          |
+
+Checks run against the real schema inside a transaction that is rolled back
+(2026-09-24): the search cap ignores reservations whose call never ran and
+refuses a step that already searched; the real `search_companies` handler sets
+aside a company with 6,083 LinkedIn members and one headquartered in London for
+a US 10-100 brief, researches one with no count, strips a personal email, and
+writes the member count and specialities into `E1`; the research prompt carries
+the kept assumptions and the size rule; research pauses while $0.15 is left and
+$0.24 is needed for two leads' drafts; and finishing a paused run with no
+allowance left adds exactly $0.24 and moves to drafting. Two real drafting steps
+and a real end-to-end replay of run 12f27441's brief (criteria, set-aside,
+research, drafting) were also run inside rolled-back transactions; their figures
+are in §13.
+
+Rolled-back checks for this round: a job-ad search counts as the step's one
+paid search and blocks a company search in the same step; research takes the
+highest-priority company first; approving a lead on a finished run whose
+allowance is spent adds exactly $0.12 and moves to drafting. Unit tests cover
+job-ad normalisation (one company per site, careers subdomains, no ad text or
+poster kept), keyword normalisation, overlap paging, the hiring check, the
+confidence correction and the evidence text.
 
 ### 15.1 The deliberately broken pack
 
@@ -1023,6 +1265,9 @@ Run before the happy path.
 | A US-headquartered company returned for "United Kingdom"                  | Stored as set aside with the reason; never researched                                 |
 | Searches used up while short of ten                                       | `awaiting_budget` with options; nothing more spent until the founder decides          |
 | A research stage that hits its stage budget                               | Real cost recorded; plain reason; company retried                                     |
+| A malformed search call that never ran                                    | Uses no search; the next step may still search                                        |
+| A company with 6,083 people on LinkedIn for a "10 to 100" brief           | Set aside with that number as its reason; never researched                            |
+| Finishing with the AI allowance spent                                     | Drafts every qualified lead, adding exactly the drafting cost shown on the button     |
 | A second page's excerpts                                                  | Appended after the first page's labels; earlier citations still resolve to their text |
 | A `pass` verdict with no cited excerpt                                    | Treated as unproven; the lead is `needs_review` with the reason stored                |
 | Stop pressed while a step is running                                      | The step's writes land, but the run stays `cancelled`                                 |
@@ -1081,3 +1326,20 @@ Each change was made here first, with its reason, then in code.
 | 2026-09-24 | Budget shortfalls pause at `awaiting_budget` and ask; limits resized from measured cost (§2.2, §6.1, §13) | A run should never end on a cap or show a raw budget error; the old caps could not fund one run |
 | 2026-09-24 | Founders approve or reject `needs_review` leads; approvals count and get drafts (§6.5, §11) | There was no way to act on a lead the checks could not settle |
 | 2026-09-24 | Stage errors keep the SDK result: real cost, plain reason (§13) | Six failed stages were logged at $0 with the SDK's raw text shown to the founder |
+| 2026-09-24 | A run the founder stopped is never listed under Needs you (§11) | A cancelled run with six leads to review kept asking the founder to "Review 6 leads" |
+| 2026-09-24 | Assumptions the founder keeps are passed to the research step as how to read the brief (§7.1, §7.3) | Approved readings (for example how subsidiaries are sized) never reached the step that judges companies |
+| 2026-09-24 | Discovery keeps the LinkedIn member count, specialities and company type, and `E1` states them (§6.4, §8.1) | The company-chosen size band could never prove "10 to 100"; every company that passed the type filter in run 12f27441 ended in review |
+| 2026-09-24 | Companies with more than twice the headcount ceiling in LinkedIn members are set aside before research (§7.2) | 24 of the first 30 companies in run 12f27441 were far too large, and each cost about $0.10 of research to reject |
+| 2026-09-24 | Criteria must be provable; absence-only conditions become disqualifiers; industries name what companies are (§7.1) | "Must be independent" was unknown for all 48 companies researched; "Business Process Outsourcing" steered a SaaS search into outsourcing firms |
+| 2026-09-24 | Extra searches see results by industry and repeat what worked; each search takes a full 50-result page; four refills by default (§7.2, §13) | An extra search told to "use broader industries" moved from software into staffing, and 30-of-50 paging skipped 20 companies a page |
+| 2026-09-24 | The search cap counts searches that ran, not reservations (migration 0009, §7.2) | A malformed call that never ran made the first extra search of run 12f27441 refuse as "already searched" |
+| 2026-09-24 | Research keeps back each qualified lead's drafting cost; Finish always drafts and states any amount it adds (§7.3, §11, §13) | Run 12f27441 finished with six leads and no outreach, because research had spent everything |
+| 2026-09-24 | The agent runs in its own folder with its own config, only its own MCP server and per-stage tools, no `Read`, and the project API key (§4, §9, §14) | Every stage had received AGENTS.md, the developer's memory, email and claude.ai connectors (Gmail included), ran on a personal login, and paid for all of it as context |
+| 2026-09-24 | Drafting stage cap raised from $0.10 to $0.25 (§7.4) | A real drafting step spent $0.13 before writing; no run had ever saved a draft |
+| 2026-09-24 | Briefs with a hiring must-have discover through LinkedIn job ads (`search_job_ads`, §7.2, §8.1b); the ads are `E1` evidence | "Hiring customer support roles" was unknown or failed for all 29 companies in run 7716f37f; company websites do not show open roles |
+| 2026-09-24 | Keywords normalised and overlapping company searches page forward (§7.2) | Two of run 7716f37f's four searches rebought the same 50 companies ($0.40) |
+| 2026-09-24 | Apify cap per run lowered from $1.10 to $0.60 (§13) | The PRD allows $5 per person for the week |
+| 2026-09-24 | Companies filtered out by their LinkedIn record get their own tab and leave the rejected and checked counts (§11) | They read as research spent on companies that never matched the brief |
+| 2026-09-24 | Approving a lead on a finished run adds its drafting cost and drafts it (§11) | An approval on a spent run only paused the run to ask for budget |
+| 2026-09-24 | Research is ordered by how well each company's industry matches the criteria (§6.2, §7.3) | Budget covers part of each search; discovery order researched a 3PL before fashion brands |
+| 2026-09-24 | High confidence with concerns lowers the confidence instead of forcing review (§10.1) | A lead with every must-have proven went to review on the number alone |

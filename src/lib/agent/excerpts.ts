@@ -62,11 +62,16 @@ export function chunkMarkdown(markdown: string, maxChunks = MAX_EXCERPTS_PER_SOU
 /** The discovery record as citable text, built only from allowlisted fields. */
 export function discoveryEvidenceText(record: Record<string, unknown>): string {
   const field = (key: string) => (typeof record[key] === "string" || typeof record[key] === "number" ? String(record[key]).trim() : "");
+  const fromJobAds = field("discovery_source") === "linkedin_job_ads";
   return [
-    `Company record from LinkedIn company search (via Apify) for ${field("company_name")} (${field("domain")}).`,
-    field("headcount") && `Company size band: ${field("headcount")}.`,
+    `Company record from LinkedIn ${fromJobAds ? "job ads" : "company search"} (via Apify) for ${field("company_name")} (${field("domain")}).`,
+    field("hiring") && `Open job ads on LinkedIn, posted in the last month: ${field("hiring")}.`,
+    field("linkedin_members") && `People on LinkedIn who list this company as their employer: ${field("linkedin_members")}.`,
+    field("headcount") && `Size band the company chose for its LinkedIn page: ${field("headcount")}.`,
     field("location") && `Headquarters: ${field("location")}.`,
     field("industry") && `Industry: ${field("industry")}.`,
+    field("company_type") && `Company type: ${field("company_type")}.`,
+    field("specialities") && `Specialities the company lists: ${field("specialities")}.`,
     field("funding") && `Funding: ${field("funding")}.`,
     field("description") && `Company description: ${field("description")}`,
   ].filter(Boolean).join("\n");

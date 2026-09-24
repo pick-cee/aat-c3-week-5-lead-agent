@@ -1,3 +1,5 @@
+import { HIGH_CONFIDENCE_WITH_CONCERN, LOW_QUALIFIED_CONFIDENCE } from "@/lib/constants";
+
 export type CitedClaim = {
   text: string;
   excerpt_labels: string[];
@@ -22,9 +24,13 @@ export type EvidenceExcerpt = { id: string; label: string; text: string };
 export type QualificationCheckResult = {
   accepted: boolean;
   status: QualificationInput["status"];
+  /** The confidence to store: the agent's, corrected when it contradicts its own concerns. */
+  confidence: number;
   errors: string[];
   /** Why the stored status differs from the one the agent asked for. */
   downgrades: string[];
+  /** Corrections that did not change the status. */
+  adjustments: string[];
   excerptIdsByLabel: Record<string, string>;
 };
 
@@ -90,12 +96,21 @@ export function checkQualification(
   }
 
   const downgrades: string[] = [];
+  const adjustments: string[] = [];
   let status = input.status;
+  let confidence = input.confidence;
   if (status === "qualified") {
     downgrades.push(...unproven);
     if (input.hard_filter_results.some((result) => result.verdict === "fail")) downgrades.push("A hard filter failed");
-    if (input.confidence > 0.8 && input.concerns.length > 0) downgrades.push("High confidence was recorded alongside open concerns");
-    if (input.confidence < 0.4) downgrades.push("Confidence is too low to count as qualified");
+    // Concerns and a very high score contradict each other, but the lead's
+    // must-haves are already proven from evidence. Sending it to review for the
+    // number alone cost founders a click on fully proven leads (Sofa Club in
+    // the 2026-09-24 replay); the score is corrected instead and the reason kept.
+    if (input.confidence > HIGH_CONFIDENCE_WITH_CONCERN && input.concerns.length > 0) {
+      confidence = HIGH_CONFIDENCE_WITH_CONCERN;
+      adjustments.push(`Confidence lowered from ${input.confidence} to ${HIGH_CONFIDENCE_WITH_CONCERN} because concerns were recorded`);
+    }
+    if (input.confidence < LOW_QUALIFIED_CONFIDENCE) downgrades.push("Confidence is too low to count as qualified");
   } else if (status === "not_qualified") {
     // A cited failure is a definitive rejection. Without one, an unknown
     // filter means the rejection itself is unproven.
@@ -111,5 +126,5 @@ export function checkQualification(
     if (!hasOkSource) errors.push("Qualified leads require at least one successfully read page from the company's own website");
   }
 
-  return { accepted: errors.length === 0, status, errors, downgrades, excerptIdsByLabel };
+  return { accepted: errors.length === 0, status, confidence, errors, downgrades, adjustments, excerptIdsByLabel };
 }

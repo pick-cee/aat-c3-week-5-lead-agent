@@ -1,8 +1,17 @@
-import { LINKEDIN_COMPANY_SIZES } from "@/lib/constants";
+import { HEADCOUNT_SET_ASIDE_FACTOR, LINKEDIN_COMPANY_SIZES } from "@/lib/constants";
 
 import { LINKEDIN_INDUSTRIES } from "./linkedin-industries";
 
-const INDUSTRY_STOPWORDS = new Set(["that", "this", "with", "have", "from", "their", "they", "which", "entities", "industry", "includes", "include", "such", "other", "services", "service", "company", "companies", "business", "businesses", "must", "based", "core", "type", "provide", "provides", "primarily"]);
+// Hard filters also carry size, place and ownership words. Left in, "Employee
+// headcount" suggested "Insurance and Employee Benefit Funds" and "Software
+// Development" suggested "Housing and Community Development" for a SaaS brief.
+const INDUSTRY_STOPWORDS = new Set([
+  "that", "this", "with", "have", "from", "their", "they", "which", "entities", "industry", "includes", "include", "such", "other",
+  "services", "service", "company", "companies", "business", "businesses", "must", "based", "core", "type", "provide", "provides", "primarily",
+  "employee", "headcount", "between", "staff", "people", "person", "size", "fewer", "less", "more", "than", "least", "over", "under",
+  "united", "state", "kingdom", "located", "headquartered", "headquarter", "country", "region",
+  "independent", "subsidiary", "parent", "owned", "classified", "development", "product",
+]);
 
 // How founders describe a company versus how LinkedIn names its industry.
 const INDUSTRY_SYNONYMS: Record<string, string[]> = {
@@ -54,6 +63,19 @@ export function suggestIndustries(input: { target_company_type?: string; industr
     .map((item) => item.label);
 }
 
+/**
+ * How well a company's own LinkedIn industry matches the criteria, for
+ * research order only. A run can afford to research a fraction of what a
+ * search returns, so the likeliest fits go first; nothing is skipped by it.
+ */
+export function industryAffinity(companyIndustry: unknown, icp: { target_company_type?: unknown; industries?: unknown; hard_filters?: unknown }): number {
+  if (typeof companyIndustry !== "string" || !companyIndustry.trim()) return 0;
+  const strings = (value: unknown) => (Array.isArray(value) ? value.map(String) : []);
+  const criteria = { target_company_type: String(icp.target_company_type ?? ""), industries: strings(icp.industries), hard_filters: strings(icp.hard_filters) };
+  const wanted = industryStems([criteria.target_company_type, ...criteria.industries, ...suggestIndustries(criteria, 8)].join(" "));
+  return [...industryStems(companyIndustry)].filter((stem) => wanted.has(stem)).length * 10;
+}
+
 /** Resolves industry names to LinkedIn ids; unknown names are returned so the agent can be told. */
 export function industryIds(names: string[]): { ids: string[]; labels: string[]; unknown: string[] } {
   const byLabel = new Map(LINKEDIN_INDUSTRIES.map(([id, label]) => [label.toLowerCase(), { id, label }]));
@@ -103,30 +125,53 @@ export function linkedInLocations(geography: string[]): string[] {
   return [...new Set(cleaned)].slice(0, 10);
 }
 
-/** Maps a free-text headcount range onto the LinkedIn size bands it overlaps. */
-export function linkedInCompanySizes(range: string): string[] {
+/** Reads a free-text headcount range ("10 to 100", "under 50", "1,000+"). */
+export function headcountBounds(range: string): { min: number; max: number } | null {
   const text = range
     .toLowerCase()
     .replace(/(\d),(\d{3})/g, "$1$2")
     .replace(/(\d+(?:\.\d+)?)\s*k\b/g, (_, value: string) => String(Math.round(Number(value) * 1_000)));
   const numbers = [...text.matchAll(/\d+/g)].map((match) => Number(match[0]));
-  let min: number;
-  let max: number;
-  if (numbers.length >= 2) {
-    min = Math.min(numbers[0], numbers[1]);
-    max = Math.max(numbers[0], numbers[1]);
-  } else if (numbers.length === 1 && /(?:under|below|fewer|less|up to|at most|maximum|<)/.test(text)) {
-    min = 1;
-    max = numbers[0];
-  } else if (numbers.length === 1 && /(?:over|above|more than|at least|minimum|\+|>)/.test(text)) {
-    min = numbers[0];
-    max = Number.POSITIVE_INFINITY;
-  } else {
-    return [];
-  }
+  if (numbers.length >= 2) return { min: Math.min(numbers[0], numbers[1]), max: Math.max(numbers[0], numbers[1]) };
+  if (numbers.length === 1 && /(?:under|below|fewer|less|up to|at most|maximum|<)/.test(text)) return { min: 1, max: numbers[0] };
+  if (numbers.length === 1 && /(?:over|above|more than|at least|minimum|\+|>)/.test(text)) return { min: numbers[0], max: Number.POSITIVE_INFINITY };
+  return null;
+}
+
+/** Maps a free-text headcount range onto the LinkedIn size bands it overlaps. */
+export function linkedInCompanySizes(range: string): string[] {
+  const bounds = headcountBounds(range);
+  if (!bounds) return [];
+  const { min, max } = bounds;
   // A band that only touches the range at one edge (11-50 for "50-500") mostly
   // holds companies outside it, and every returned company is charged.
   return LINKEDIN_COMPANY_SIZES
     .filter((band) => Math.max(min, band.min) < Math.min(max, band.max) || (min === max && band.min <= min && min <= band.max))
     .map((band) => band.label);
+}
+
+/**
+ * The size reason for setting a company aside before research, or null. Only
+ * the ceiling is used: LinkedIn undercounts small companies, so a low count is
+ * no evidence of being too small, but thousands of people listing a company as
+ * their employer is strong evidence against "10 to 100 employees".
+ */
+export function clearlyAboveHeadcount(members: unknown, range: string): string | null {
+  const bounds = headcountBounds(range);
+  if (typeof members !== "number" || !Number.isFinite(members) || !bounds || !Number.isFinite(bounds.max)) return null;
+  if (members <= bounds.max * HEADCOUNT_SET_ASIDE_FACTOR) return null;
+  return `${members.toLocaleString("en-US")} people on LinkedIn list this company as their employer, more than ${HEADCOUNT_SET_ASIDE_FACTOR} times your limit of ${bounds.max.toLocaleString("en-US")}. Set aside without spending research on it.`;
+}
+
+/**
+ * Search words as the agent should have written them. An agent once passed
+ * the two characters `""` as keywords: it read as a new search, restarted at
+ * page one, and bought the same 50 companies again.
+ */
+export function normalizeKeywords(value: string): string {
+  return value
+    .replace(/["'`“”‘’]/g, "")
+    .replace(/[^\p{L}\p{N}\s&+-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }

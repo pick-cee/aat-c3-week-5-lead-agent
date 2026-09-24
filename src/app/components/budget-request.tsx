@@ -14,7 +14,13 @@ import { Icon } from "./icons";
  * found so far, and exactly what each option allows, then decides. Only this
  * decision raises a cap; the agent never can.
  */
-export function BudgetRequestPanel({ runId, request }: { runId: string; request: BudgetRequest }) {
+export function BudgetRequestPanel({ runId, request, drafting }: {
+  runId: string;
+  request: BudgetRequest;
+  // Finishing always writes outreach for the qualified leads; topUpUsd is what
+  // that adds to the AI budget, computed with the same function the server uses.
+  drafting: { leads: number; topUpUsd: number };
+}) {
   const router = useRouter();
   const [open, setOpen] = useState(true);
   const [choice, setChoice] = useState(0);
@@ -88,9 +94,10 @@ export function BudgetRequestPanel({ runId, request }: { runId: string; request:
         </label>)}
       </fieldset>
       <p className="muted small">These are ceilings, not charges: Koya stops as soon as it has {request.target} qualified leads.</p>
+      {drafting.leads > 0 && <p className="muted small">Finishing writes outreach drafts for the {drafting.leads} qualified lead{drafting.leads === 1 ? "" : "s"}{drafting.topUpUsd > 0 ? `, adding up to ${money(drafting.topUpUsd)} of AI budget for them (an estimate, not a bill)` : ", within the budget already set"}.</p>}
       {error && <p className="form-error" role="alert">{error}</p>}
       <div className="modal-actions">
-        <button type="button" className="button button-ghost" disabled={busy !== null} onClick={() => act("finish")}>{busy === "finish" ? "Finishing..." : `Finish with ${request.qualified} lead${request.qualified === 1 ? "" : "s"}`}</button>
+        <button type="button" className="button button-ghost" disabled={busy !== null} onClick={() => act("finish")}>{busy === "finish" ? "Finishing..." : drafting.leads > 0 ? `Finish and write outreach for ${drafting.leads} lead${drafting.leads === 1 ? "" : "s"}` : "Finish with no leads"}</button>
         <button type="button" className="button button-primary" disabled={busy !== null} onClick={() => act("raise")}>{busy === "raise" ? "Adding..." : "Add budget and keep going"}<Icon name="arrow" size={16} /></button>
       </div>
     </div>

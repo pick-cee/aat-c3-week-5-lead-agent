@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { assumptionTargets, checkRefinedIcp, guessAssumptionTargets, sanitizeAssumptionLinks, type RefinedIcp } from "./icp";
+import { assumptionTargets, checkRefinedIcp, guessAssumptionTargets, hiringRequirement, sanitizeAssumptionLinks, type RefinedIcp } from "./icp";
 
 const base = { target_company_type: "B2B SaaS", industries: ["Software"], geography: ["UK"], headcount_range: "50-500", buyer_persona: "Founder", business_problem: "Hiring", hard_filters: ["UK"], soft_preferences: [], disqualifiers: [], assumptions: [] };
 
@@ -48,5 +48,23 @@ describe("assumption links", () => {
   it("follows a criterion into another list by its text", () => {
     const moved: RefinedIcp = { ...agencies, hard_filters: agencies.hard_filters.slice(1), soft_preferences: [...agencies.soft_preferences, agencies.hard_filters[0]], assumption_links: [{ assumption: agencies.assumptions[0], related: [agencies.hard_filters[0]] }] };
     assert.deepEqual(assumptionTargets(moved, agencies.assumptions[0]), [{ kind: "criterion", list: "soft_preferences", text: agencies.hard_filters[0] }]);
+  });
+});
+
+describe("hiring must-haves", () => {
+  it("recognises the ways a brief says a company must be hiring", () => {
+    for (const filter of [
+      "Hiring for customer support roles",
+      "Has published job openings for customer support roles on LinkedIn or company careers page",
+      "Currently hires account executives",
+      "Has open roles in operations",
+      "Has live job ads for engineers",
+      "Advertising vacancies for warehouse staff",
+    ]) assert.equal(hiringRequirement(["Based in the United Kingdom", filter]), filter, filter);
+  });
+
+  it("does not treat size, place or type criteria as hiring", () => {
+    assert.equal(hiringRequirement(["Has 20 to 200 employees listed on LinkedIn", "Headquartered in the United Kingdom", "Operates an e-commerce business"]), null);
+    assert.equal(hiringRequirement(["Staffing agency serving hospitals"]), null);
   });
 });

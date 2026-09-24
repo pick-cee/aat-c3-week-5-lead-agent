@@ -53,6 +53,8 @@ export type NewCandidate = {
   evidence: { url: string; text: string; injectionMatches: string[] };
   /** Stored but not researched, with the reason shown to the founder. */
   skipReason?: string;
+  /** Higher is researched first: how well its LinkedIn industry matches the criteria. */
+  priority?: number;
 };
 
 export type CandidateRecord = {

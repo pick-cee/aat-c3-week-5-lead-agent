@@ -28,21 +28,33 @@ export function DraftingCriteria() {
 
 function counts(candidates: DashboardCandidate[]) {
   const by = (status: string) => candidates.filter((candidate) => candidate.status === status).length;
+  // Companies filtered out by their LinkedIn record were never researched, so
+  // they count neither as checked nor as rejected; each search line shows them.
+  const considered = candidates.filter((candidate) => candidate.status !== "skipped");
   return {
-    found: candidates.length,
-    researched: candidates.filter((candidate) => !["discovered", "researching"].includes(candidate.status)).length,
+    found: considered.length,
+    researched: considered.filter((candidate) => !["discovered", "researching"].includes(candidate.status)).length,
     qualified: by("qualified"),
     review: by("needs_review"),
-    rejected: by("not_qualified") + by("skipped"),
+    rejected: by("not_qualified"),
     failed: by("failed"),
     drafted: candidates.filter((candidate) => candidate.status === "qualified" && candidate.drafts.length >= 4).length,
   };
 }
 
 function searchLine(search: DashboardRun["searches"][number]): string {
+  if (search.source === "job_ads") {
+    const where = search.locations.join(", ");
+    const found = search.returned_count === null
+      ? "running"
+      : `${search.returned_count} job ads, ${search.stored_count ?? 0} companies to research${search.set_aside_count ? `, ${search.set_aside_count} set aside from their LinkedIn record` : ""}`;
+    return `Job ads for "${search.keywords ?? ""}"${where ? ` in ${where}` : ""}, last month: ${found}`;
+  }
   const what = [search.industries.join(" + "), search.keywords ? `"${search.keywords}"` : ""].filter(Boolean).join(", ") || "Search";
   const filters = [search.locations.join(", "), search.company_sizes.length ? `${search.company_sizes.join(", ")} employees` : ""].filter(Boolean).join(" · ");
-  const found = search.returned_count === null ? "running" : `${search.returned_count} found, ${search.stored_count ?? 0} to research`;
+  const found = search.returned_count === null
+    ? "running"
+    : `${search.returned_count} found, ${search.stored_count ?? 0} to research${search.set_aside_count ? `, ${search.set_aside_count} set aside from their LinkedIn record` : ""}`;
   return `${what}${filters ? ` (${filters})` : ""}: ${found}${typeof search.total_available === "number" ? ` of ${search.total_available.toLocaleString()} matching on LinkedIn` : ""}`;
 }
 
@@ -64,7 +76,7 @@ export function Progress({ data }: { data: DashboardData }) {
   const headline = paused
     ? "Paused until you decide on budget"
     : run.status === "discovering"
-      ? (run.refills_used ? `Searching again (search ${run.refills_used + 1}) to find more companies` : "Searching LinkedIn company records with your filters")
+      ? (run.refills_used ? `Searching again (search ${run.refills_used + 1}) to find more companies` : "Searching LinkedIn for companies that match your criteria")
       : run.status === "researching"
         ? (researching.length > 1 ? `Researching ${researching.length} companies at once` : `Researching ${researching[0] ?? "the next company"}`)
         : `Writing outreach drafts: ${c.drafted} of ${c.qualified} leads done`;
@@ -173,6 +185,7 @@ export function CriteriaSummary({ run }: { run: DashboardRun }) {
 
 const TOOL_LABELS: Record<string, string> = {
   search_companies: "Company search (Apify)",
+  search_job_ads: "Job ad search (Apify)",
   scrape_site: "Read website (Firecrawl)",
   store_excerpts: "Store evidence",
   record_qualification: "Record decision",

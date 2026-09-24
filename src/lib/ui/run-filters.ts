@@ -12,9 +12,12 @@ export const RUN_FILTERS = [
 
 export type RunFilter = (typeof RUN_FILTERS)[number]["key"];
 
+// Leads to review only make a run "need you" once it has finished. A run the
+// founder stopped was their decision; its leads stay reviewable on the run page
+// but it is not a task.
 export function needsYou(run: Pick<RunSummary, "status" | "needs_review_count">): boolean {
   return ["awaiting_icp_confirmation", "awaiting_budget", "failed", "budget_exceeded"].includes(run.status)
-    || (run.needs_review_count > 0 && !RUNNING_STATUSES.has(run.status));
+    || (run.needs_review_count > 0 && (run.status === "complete" || run.status === "short_of_target"));
 }
 
 export function matchesFilter(run: RunSummary, filter: RunFilter): boolean {

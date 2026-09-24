@@ -15,6 +15,7 @@ function nextStep(run: RunSummary): string {
   if (run.status === "awaiting_icp_confirmation") return "Approve the criteria";
   if (run.status === "awaiting_budget") return "Decide on more budget";
   if (run.status === "failed" || run.status === "budget_exceeded") return "See what happened";
+  if (run.status === "cancelled") return "Stopped by you";
   if (run.needs_review_count > 0 && !RUNNING_STATUSES.has(run.status)) return `Review ${run.needs_review_count} lead${run.needs_review_count === 1 ? "" : "s"}`;
   if (RUNNING_STATUSES.has(run.status)) return run.candidate_count ? `${run.researched_count} of ${run.candidate_count} researched` : "Working";
   return "Open results";
