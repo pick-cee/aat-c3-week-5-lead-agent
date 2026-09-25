@@ -859,6 +859,7 @@ review spent the founder's attention on companies already ruled out.
 | Length                   | Each email under 150 words, LinkedIn message under 300 characters                                    |
 | Banned register          | No fake urgency, no "hope this finds you well", no generic praise. Word list in constants            |
 | No em dashes             | Removed mechanically at save, and the count that got through is logged                               |
+| No evidence labels in the text | Labels such as "(E2, E3)" or "[E1]" are stripped from subject and body at save and counted in `checks.removed_evidence_labels`; a bare label left in the text is rejected so the agent rewrites it. They stay in each draft's citations and in the founder's personalisation note. 35 of the first 88 saved drafts carried them, and "Copy" pasted them into the email; those drafts were repaired on 2026-09-25 (`scripts/repair-draft-labels.ts`) |
 
 ### 10.3 List quality
 
@@ -1373,5 +1374,6 @@ Each change was made here first, with its reason, then in code.
 | 2026-09-24 | Approving a lead on a finished run adds its drafting cost and drafts it (§11) | An approval on a spent run only paused the run to ask for budget |
 | 2026-09-24 | Research is ordered by how well each company's industry matches the criteria (§6.2, §7.3) | Budget covers part of each search; discovery order researched a 3PL before fashion brands |
 | 2026-09-24 | High confidence with concerns lowers the confidence instead of forcing review (§10.1) | A lead with every must-have proven went to review on the number alone |
+| 2026-09-25 | Evidence labels are stripped from email text at save, bare ones rejected, and the 35 saved drafts that had them repaired (§10.2) | "Copy email" pasted "(E2, E3, E4)" into the email a prospect would read |
 | 2026-09-25 | The app uses Supabase's transaction pooler (port 6543) with at most 3 connections per Vercel instance; migrations keep session mode (§9) | Every page on the first deployment failed with EMAXCONNSESSION: each function instance held its own session-mode pool |
 | 2026-09-25 | The Claude Code program is included in the two agent routes and passed explicitly; only a server that has it runs the scheduler or claims a run (§9) | The first Vercel deployment failed every run with "Native CLI binary for linux-x64 not found", and page functions without the program claimed runs |

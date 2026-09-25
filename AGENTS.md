@@ -364,6 +364,10 @@ page-by-page contract is `DESIGN.md` §11.
 - Prefer explicit failure over a plausible default.
 - Thresholds, limits and prices are named constants in one file with a
   `PRICES_VERIFIED_ON` date, never literals scattered through the code.
+- No evidence labels in outreach text. E1, E2 and the like are how the founder
+  traces a line to evidence; they live in a draft's citations, never in the
+  subject or body a prospect reads. Forbidden in the prompt, stripped at save,
+  and a bare one rejected, for the same reason as em dashes below.
 - No em dashes in generated content. Forbidden in the prompt and removed
   mechanically at save, because asking a model not to use them does not reliably
   work. Log the count that got through so "the prompt is working" is a number.

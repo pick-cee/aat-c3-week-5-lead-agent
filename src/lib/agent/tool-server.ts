@@ -516,11 +516,11 @@ export function createLeadAgentToolServer(
               body: draft.body,
               personalizationNote: draft.personalization_note,
               citedExcerptIds: draft.excerpt_labels.map((label) => ids[label]).filter(Boolean),
-              checks: { passed: true, removed_em_dashes: checked.removedEmDashes },
+              checks: { passed: true, removed_em_dashes: checked.removedEmDashes, removed_evidence_labels: checked.removedEvidenceLabels },
               modelUsed: STAGE_MODELS.draft_one,
             })),
           });
-          return { accepted: true, draft_count: checked.drafts.length, removed_em_dashes: checked.removedEmDashes };
+          return { accepted: true, draft_count: checked.drafts.length, removed_em_dashes: checked.removedEmDashes, removed_evidence_labels: checked.removedEvidenceLabels };
         },
       ),
     WRITE_ANNOTATIONS,

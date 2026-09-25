@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { checkOutreachCopy } from "./copy";
+import { checkOutreachCopy, stripEvidenceLabels } from "./copy";
 import { computeListQuality } from "./list-quality";
 import { checkQualification } from "./qualification";
 
@@ -192,5 +192,34 @@ describe("figures from the founder's own criteria", () => {
     const result = checkQualification({ status: "not_qualified", confidence: 0.9, fit_reasons: [], concerns: [{ text: "Only 7 staff listed", excerpt_labels: ["E1"] }], hard_filter_results: [{ criterion: "10-50 full-time employees", verdict: "fail", excerpt_labels: ["E1"] }] }, ["10-50 full-time employees"], evidence, true, JSON.stringify({ hard_filters: ["10-50 full-time employees"] }));
     assert.equal(result.accepted, false);
     assert.match(result.errors.join(" "), /Figure 7/);
+  });
+});
+
+describe("evidence labels never reach the recipient", () => {
+  it("removes the bracketed forms found in saved drafts and tidies the space they leave", () => {
+    const cases: Array<[string, string]> = [
+      ["patching by hand (E2, E3, E4). That kind of friction", "patching by hand. That kind of friction"],
+      ["as the business grows [E1].\n\nIf now is wrong", "as the business grows.\n\nIf now is wrong"],
+      ["nothing is listed. [E1] Curious how you", "nothing is listed. Curious how you"],
+      ["the ring pods (E6) isn't a cue", "the ring pods isn't a cue"],
+      ["across websites [E1, E2]. That", "across websites. That"],
+      ["compliance needs (E3, E4, E8, E9).", "compliance needs."],
+    ];
+    for (const [before, after] of cases) assert.equal(stripEvidenceLabels(before).text, after, before);
+    assert.equal(stripEvidenceLabels("Nothing to remove, E2E testing aside.").removed, 0);
+  });
+
+  it("saves the email without labels, keeps them in the founder's note, and rejects a bare label", () => {
+    const evidence = [{ id: "1", label: "E2", text: "Governance gaps and manual access reviews." }];
+    const drafts = [1, 2, 3].map((step) => ({ channel: "email" as const, step, subject: "Governance (E2)", body: step === 1 ? "Your materials describe manual access reviews (E2). Worth a chat?" : "Following up.", personalization_note: "Rests on E2", excerpt_labels: ["E2"] }));
+    const ok = checkOutreachCopy([...drafts, { channel: "linkedin", step: 1, body: "Saw the note on access reviews [E2]. Open to a chat?", personalization_note: "E2", excerpt_labels: ["E2"] }], evidence, ["Acme"], []);
+    assert.equal(ok.accepted, true, ok.errors.join("; "));
+    assert.equal(ok.drafts[0].body, "Your materials describe manual access reviews. Worth a chat?");
+    assert.equal(ok.drafts[0].subject, "Governance");
+    assert.equal(ok.drafts[0].personalization_note, "Rests on E2");
+    assert.equal(ok.removedEvidenceLabels, 5);
+    const bare = checkOutreachCopy([...drafts.map((draft) => ({ ...draft, body: draft.step === 1 ? "As E2 shows, reviews are manual." : draft.body })), { channel: "linkedin", step: 1, body: "Open to a chat?", personalization_note: "E2", excerpt_labels: ["E2"] }], evidence, ["Acme"], []);
+    assert.equal(bare.accepted, false);
+    assert.match(bare.errors.join(" "), /evidence label/);
   });
 });
