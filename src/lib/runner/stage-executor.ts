@@ -93,7 +93,8 @@ export async function executeAgentStage(input: {
       prompt: input.prompt,
       options: {
         cwd: runtime.cwd,
-        env: { ...process.env, CLAUDE_CONFIG_DIR: runtime.configDir },
+        pathToClaudeCodeExecutable: runtime.executable,
+        env: { ...process.env, CLAUDE_CONFIG_DIR: runtime.configDir, HOME: runtime.home, XDG_CONFIG_HOME: runtime.home, XDG_CACHE_HOME: runtime.home, XDG_DATA_HOME: runtime.home },
         persistSession: false,
         model: STAGE_MODELS[input.context.stage],
         maxTurns: STAGE_LIMITS[input.context.stage].maxTurns,

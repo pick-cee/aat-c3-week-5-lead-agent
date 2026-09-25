@@ -11,6 +11,7 @@ import { PostgresLeadAgentRepository } from "../agent/postgres-repository";
 import { prefetchHomepage, type Prefetched } from "../agent/prefetch";
 import { safeErrorMessage } from "../agent/redaction";
 import { RunStore, type Candidate, type DraftContext, type RunRecord } from "../runs/run-store";
+import { agentExecutable } from "./agent-runtime";
 import { executeAgentStage, type StageExecution } from "./stage-executor";
 
 const icpSchema = z.object({
@@ -193,6 +194,11 @@ export async function advanceRun(input: {
   executeStage?: StageExecutor;
   scraper?: SiteScraper;
 }) {
+  // A server that cannot run the agent must not claim a run: the claim would
+  // end in a failure that is the deployment's, not the run's.
+  if (!input.executeStage && !agentExecutable()) {
+    return { advanced: false, reason: "This server cannot run the agent (its Claude Code program is missing); another server will take the step" };
+  }
   const store = input.store ?? new RunStore();
   const repository = input.repository ?? new PostgresLeadAgentRepository();
   const executeStage = input.executeStage ?? executeAgentStage;
