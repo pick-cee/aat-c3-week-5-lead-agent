@@ -323,6 +323,16 @@ page-by-page contract is `DESIGN.md` §11.
   login at all, every stage fails with "Not logged in".
 - Without `strictMcpConfig: true`, the host's MCP servers and claude.ai
   connectors are attached to every stage.
+- The SDK runs a native Claude Code program from a platform package
+  (`@anthropic-ai/claude-agent-sdk-linux-x64` on Vercel, 237.4 MB) that it finds
+  by name at run time, so the build does not ship it unless told to. It is
+  included only in `/api/runner` and `/api/runs/[id]/advance` (244.6 MB with it,
+  against Vercel's 250 MB function limit) and passed as
+  `pathToClaudeCodeExecutable`. Keep the path assembled at run time: when the
+  file tracer could follow it, the program went into instrumentation and so
+  into every function. Keep functions that run the agent lean; there is about
+  5 MB of headroom. A server that cannot find the program must not start the
+  scheduler or claim a run.
 - Most of a stage's cost is context written to cache before the first word.
   Anything in that context is paid for on every company. Measure with the
   per-call `usage` on assistant messages, not with the result total.
@@ -345,6 +355,12 @@ page-by-page contract is `DESIGN.md` §11.
 - Every state transition writes a log row.
 - Counters use an atomic upsert, never read-modify-write, and fail closed when
   the counter cannot be read.
+- The app reaches Postgres through Supabase's transaction pooler (port 6543,
+  derived in `database.ts` from `SUPABASE_DB_URL`). Session mode ran out of
+  clients on the first Vercel deployment. So nothing in the app may depend on a
+  session: use `pg_advisory_xact_lock`, never `pg_advisory_lock`, no `SET`
+  outside a transaction, no `LISTEN`. Only the migration script uses session
+  mode, via `useSessionMode()`.
 - Prefer explicit failure over a plausible default.
 - Thresholds, limits and prices are named constants in one file with a
   `PRICES_VERIFIED_ON` date, never literals scattered through the code.

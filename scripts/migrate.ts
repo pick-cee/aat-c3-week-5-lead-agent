@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
-import { closePool, getPool } from "../src/lib/server/database";
+import { closePool, getPool, useSessionMode } from "../src/lib/server/database";
 
 const MIGRATION_DIRECTORY = path.join(process.cwd(), "supabase", "migrations");
 const MIGRATION_LOCK_KEY = "lead_agent:migrations:v1";
@@ -33,6 +33,8 @@ function checksum(contents: string): string {
 }
 
 async function main(): Promise<void> {
+  // The migration lock below is a session lock; transaction pooling would drop it.
+  useSessionMode();
   const client = await getPool().connect();
 
   try {

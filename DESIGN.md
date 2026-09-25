@@ -774,6 +774,36 @@ copied into the agent's own folder (§4, Layer 0) and loaded from there, and
 `outputFileTracingIncludes` ships them with the build, because nothing imports
 them and the build would otherwise leave them out.
 
+The Agent SDK runs a native Claude Code program that ships as a platform
+package (`@anthropic-ai/claude-agent-sdk-linux-x64` on Vercel, 237.4 MB) and is
+found by name at run time, so the build cannot see it either. The first Vercel
+deployment left it out and every stage failed with "Native CLI binary for
+linux-x64 not found". It is included only in the two routes that run the agent,
+`/api/runner` and `/api/runs/[id]/advance` (7.2 MB without it, 244.6 MB with it,
+against Vercel's 250 MB function limit), and the executor passes its path
+explicitly (`pathToClaudeCodeExecutable`). The path is assembled at run time on
+purpose: when the build's file tracer could follow it, it copied the program
+into `instrumentation.js`, which Vercel bundles into every function. The
+program's home and config folders live under the temp folder, the only
+writable place on Vercel, and a copy is made executable there if the deployment
+drops the executable bit.
+
+The app connects to Supabase's pooler in transaction mode (port 6543), chosen
+in code from the same `SUPABASE_DB_URL` (`appConnectionString`), with at most 3
+connections per Vercel instance. In session mode (5432) every client holds a
+pooler slot for its whole life; each function instance opened its own pool of
+eight, the scheduler's 15-second tick kept them busy, and the first deployment
+returned "EMAXCONNSESSION max clients reached in session mode" on every page.
+Nothing in the app needs a session: its one lock is `pg_advisory_xact_lock`,
+held for a transaction. The migration script keeps session mode, because its
+lock (`pg_advisory_lock`) lives for the session.
+
+A server without the program never takes a step. On Vercel every function runs
+instrumentation and so started the scheduler, and a page function without the
+program claimed a run and failed it. The scheduler now starts, and `advanceRun`
+now claims, only where `agentExecutable()` finds the program; elsewhere the run
+is left for a server that can run it.
+
 | Skill                  | Model-invoked | Backed by code                 |
 | ---------------------- | ------------- | ------------------------------ |
 | `icp-refinement`       | yes           | structural validation only     |
@@ -1343,3 +1373,5 @@ Each change was made here first, with its reason, then in code.
 | 2026-09-24 | Approving a lead on a finished run adds its drafting cost and drafts it (§11) | An approval on a spent run only paused the run to ask for budget |
 | 2026-09-24 | Research is ordered by how well each company's industry matches the criteria (§6.2, §7.3) | Budget covers part of each search; discovery order researched a 3PL before fashion brands |
 | 2026-09-24 | High confidence with concerns lowers the confidence instead of forcing review (§10.1) | A lead with every must-have proven went to review on the number alone |
+| 2026-09-25 | The app uses Supabase's transaction pooler (port 6543) with at most 3 connections per Vercel instance; migrations keep session mode (§9) | Every page on the first deployment failed with EMAXCONNSESSION: each function instance held its own session-mode pool |
+| 2026-09-25 | The Claude Code program is included in the two agent routes and passed explicitly; only a server that has it runs the scheduler or claims a run (§9) | The first Vercel deployment failed every run with "Native CLI binary for linux-x64 not found", and page functions without the program claimed runs |
